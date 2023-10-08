@@ -112,13 +112,17 @@ Read until chapter 2 but stop before "Graph-like Data Models".
 		{
 			“user_id”: 251,
 			“First_name”: “Bill”,
-		},
-		…
+		}
 	],
+
 	“Positions”: [
-		{ “position_id”: 1, “job_title”: “Co-chair”, “organization”: “Bill & Melinda Gates Foundation”, “user_id”: 251 }
-	],
-	…
+		{ 
+            “position_id”: 1, 
+            “job_title”: “Co-chair”, 
+            “organization”: “Bill & Melinda Gates Foundation”, 
+            “user_id”: 251
+        }
+    ]
 }
 ```
 
