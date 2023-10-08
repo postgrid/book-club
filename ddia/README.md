@@ -1,6 +1,7 @@
 # Designing Data Intensive Applications
 
-This README has the exercises for DDIA. Your solution for week N should be placed in a folder named `{your first name}/{weekN}` relative to this directory.
+This README has the exercises for DDIA. Your solution for week N should be placed in a folder named `{your first name}/{weekN}` relative to this directory. If the week has multiple exercises, it is up to you how you want to structure that in your subfolder. A script/file per exercise is
+usually sufficient but you can also have a folder for each.
 
 ## Schedule
 
