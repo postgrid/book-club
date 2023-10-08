@@ -27,6 +27,11 @@ const KeyToValueMetadataMap = std.StringHashMap(ValueMetadata);
 // there are still ValueProxy's in use for that file. This way, we can update our
 // key to segment offset map immediately (sort of, we greatly limit the lock time) when we
 // compact/merge.
+//
+// Let's say that our store gets bombarded with reads; this would still not be a problem because
+// we'll swap out the segment map as soon as the compaction is completed and our `get` fn below
+// returns. So we'll have only as many references to the original segment file as there were ValueProxies
+// that called `get` in parallel; a number which is limited in practice by the number of cores on the machine.
 const ValueProxy = struct {
     file: *File,
     value_metadata: ValueMetadata,
@@ -69,13 +74,15 @@ const Store = struct {
                 .read = true,
             },
         );
-        errdefer {
-            segment_file.close();
-        }
+        errdefer segment_file.close();
 
         var key_to_value_metadata = KeyToValueMetadataMap.init(allocator);
         errdefer {
-            // TODO(Apaar): Free keys
+            var key_iter = key_to_value_metadata.keyIterator();
+            while (key_iter.next()) |key| {
+                allocator.free(key.*);
+            }
+
             key_to_value_metadata.deinit();
         }
 
@@ -259,6 +266,39 @@ const Store = struct {
         return true;
     }
 };
+
+test "set and get" {
+    var store = try Store.init(std.testing.allocator, "test.log");
+    defer store.deinit();
+
+    try store.setAllocKey("hello", "world");
+
+    const proxy = store.get("hello").?;
+
+    var value = try proxy.readAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(value);
+
+    std.debug.assert(std.mem.eql(u8, value, "world"));
+}
+
+test "set, close, open, and get" {
+    {
+        var store = try Store.init(std.testing.allocator, "test.log");
+        defer store.deinit();
+
+        try store.setAllocKey("hello", "world");
+    }
+
+    var store = try Store.init(std.testing.allocator, "test.log");
+    defer store.deinit();
+
+    const proxy = store.get("hello").?;
+
+    var value = try proxy.readAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(value);
+
+    std.debug.assert(std.mem.eql(u8, value, "world"));
+}
 
 pub fn main() !void {
     var gpa = Gpa{};
