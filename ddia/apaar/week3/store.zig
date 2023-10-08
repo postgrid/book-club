@@ -98,6 +98,8 @@ const Store = struct {
                 break;
             }
 
+            std.debug.assert(count == op_type_key_len_buf.len);
+
             const op_type: WriteOpType = @enumFromInt(op_type_key_len_buf[0]);
 
             var key_len_buf: [8]u8 align(@alignOf(u64)) = undefined;
@@ -144,6 +146,9 @@ const Store = struct {
                 },
 
                 .del => {
+                    // Skip the key
+                    try segment_file.seekBy(@intCast(key_len));
+
                     const removed = key_to_value_metadata.fetchRemove(temp_key_buf.items);
 
                     if (removed) |entry| {
@@ -298,4 +303,31 @@ test "set, close, open, and get" {
     defer std.testing.allocator.free(value);
 
     std.debug.assert(std.mem.eql(u8, value, "world"));
+}
+
+test "set, del, and get" {
+    var store = try Store.init(std.testing.allocator, "test.log");
+    defer store.deinit();
+
+    try store.setAllocKey("hello", "world");
+    std.debug.assert(try store.del("hello"));
+
+    const proxy = store.get("hello");
+    std.debug.assert(proxy == null);
+}
+
+test "set, del, close, open, and get" {
+    {
+        var store = try Store.init(std.testing.allocator, "test.log");
+        defer store.deinit();
+
+        try store.setAllocKey("hello", "world");
+        std.debug.assert(try store.del("hello"));
+    }
+
+    var store = try Store.init(std.testing.allocator, "test.log");
+    defer store.deinit();
+
+    const proxy = store.get("hello");
+    std.debug.assert(proxy == null);
 }
