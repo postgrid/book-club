@@ -16,7 +16,7 @@ Note that the syntax above is TypeScript-ish but you can use any programming lan
 
 Also note that the log file can be stored in any format, but you must be able to store the equivalent of a NodeJS Buffer i.e. binary blobs as the values.
 
-```
+```ts
 const db = open(“test.log”);
 
 set(db, “a”, Buffer.from(“test”));
