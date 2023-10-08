@@ -44,7 +44,7 @@ assert.equal(b.toString(), “test 2”);
 
 **Bonus 2** Segment the log file once it reaches a certain size (as described in the textbook).
 
-**Bonus 3** Write a worker/thread that compacts previously written segments and merges them. 
+**Bonus 3** Write a worker/thread that compacts previously written segments and merges them.
 
 ### Week 2 (Sept 19 - Sept 26)
 
@@ -84,11 +84,11 @@ Your function can receive the above vertices and edges arrays and also an array 
 
 ```ts
 function queryGraph(
-    vertices, 
-    edges, 
-    searchForNodeType = “person”, 
+    vertices,
+    edges,
+    searchForNodeType = “person”,
     connections = [
-        {“label”: “born_in”, “follow”: “within”, “name”: “us”}, 
+        {“label”: “born_in”, “follow”: “within”, “name”: “us”},
         {“label”: “lives_in”, “follow”: “within”, “name”: “europe”}
     ]
 );
@@ -108,18 +108,18 @@ Read until chapter 2 but stop before "Graph-like Data Models".
 
 ```json
 {
-	“Users”: [
-		{
-			“user_id”: 251,
-			“First_name”: “Bill”,
-		}
-	],
+    “Users”: [
+        {
+            “user_id”: 251,
+            “First_name”: “Bill”,
+        }
+    ],
 
-	“Positions”: [
-		{ 
-            “position_id”: 1, 
-            “job_title”: “Co-chair”, 
-            “organization”: “Bill & Melinda Gates Foundation”, 
+    “Positions”: [
+        {
+            “position_id”: 1,
+            “job_title”: “Co-chair”,
+            “organization”: “Bill & Melinda Gates Foundation”,
             “user_id”: 251
         }
     ]
@@ -137,4 +137,3 @@ Note: You are not allowed to use actual CSS selectors (unless you write a thing 
 Write a thing that takes in a DOM tree or something similar (XML tree) and then converts it into a relational-database type thing, and then allows you to query that using SQL-type syntax.
 
 Although I would allow you to use SQLite or something, it would be cool to write your own SQL subset parser for this.
-
