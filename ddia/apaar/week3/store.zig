@@ -31,19 +31,26 @@ const ValueProxy = struct {
     file: *File,
     value_metadata: ValueMetadata,
 
-    pub fn readAlloc(self: @This(), allocator: Allocator) ![]u8 {
+    const Self = @This();
+
+    pub fn readInto(self: *const Self, out_buf: []u8) ![]u8 {
+        std.debug.assert(out_buf.len == self.value_metadata.len);
+
         const pos = try self.file.getPos();
 
         try self.file.seekTo(self.value_metadata.offset);
 
-        const buf = try allocator.alloc(u8, self.value_metadata.len);
-
         // TODO(Apaar): Handle EOF case
-        _ = try self.file.readAll(buf);
+        _ = try self.file.readAll(out_buf);
 
         try self.file.seekTo(pos);
 
-        return buf;
+        return out_buf;
+    }
+
+    pub fn readAlloc(self: *const Self, allocator: Allocator) ![]u8 {
+        const buf = try allocator.alloc(u8, self.value_metadata.len);
+        return self.readInto(buf);
     }
 };
 
