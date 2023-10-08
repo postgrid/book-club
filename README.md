@@ -106,7 +106,7 @@ Read until chapter 2 but stop before "Graph-like Data Models".
 
 1. Write a function (any language) that receives a document such as the one in Example 2-1 on page 30/31 and converts this into a “relational” data model like the following:
 
-```json
+```js
 {
     “Users”: [
         {
