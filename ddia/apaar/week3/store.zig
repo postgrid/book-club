@@ -299,24 +299,3 @@ test "set, close, open, and get" {
 
     std.debug.assert(std.mem.eql(u8, value, "world"));
 }
-
-pub fn main() !void {
-    var gpa = Gpa{};
-    const allocator = gpa.allocator();
-    defer _ = gpa.deinit();
-
-    var store = try Store.init(allocator, "test.log");
-    defer store.deinit();
-
-    try store.setAllocKey("hello", "world");
-    try store.setAllocKey("goodbye", "universe");
-
-    const value = store.get("hello");
-
-    if (value) |v| {
-        const res = try v.readAlloc(allocator);
-        defer allocator.free(res);
-
-        std.debug.print("{s}\n", .{res});
-    }
-}
