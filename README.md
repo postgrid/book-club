@@ -108,19 +108,19 @@ Read until chapter 2 but stop before "Graph-like Data Models".
 
 ```js
 {
-    “Users”: [
+    "Users": [
         {
-            “user_id”: 251,
-            “First_name”: “Bill”,
+            "user_id": 251,
+            "First_name": “Bill”,
         }
     ],
 
-    “Positions”: [
+    "Positions": [
         {
-            “position_id”: 1,
-            “job_title”: “Co-chair”,
-            “organization”: “Bill & Melinda Gates Foundation”,
-            “user_id”: 251
+            "position_id": 1,
+            "job_title": "Co-chair",
+            "organization": "Bill & Melinda Gates Foundation",
+            "user_id": 251
         }
     ]
 }
