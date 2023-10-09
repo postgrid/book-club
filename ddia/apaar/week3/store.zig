@@ -78,13 +78,11 @@ const Segment = struct {
 
     const Self = @This();
 
-    pub fn init(allocator: Allocator, pathname: []const u8) !Self {
+    /// `file` must be opened in read-write mode.
+    pub fn init(allocator: Allocator, file: File) !Self {
         var self = Segment{
             .allocator = allocator,
-            .file = try std.fs.cwd().createFile(pathname, .{
-                .truncate = false,
-                .read = true,
-            }),
+            .file = file,
             .key_to_value_metadata = KeyToValueMetadataMap.init(allocator),
         };
         errdefer self.deinit();
@@ -288,63 +286,67 @@ const Segment = struct {
         return true;
     }
 
-    pub fn compactInto(self: *Self, dest_pathname: []const u8) !void {
-        // We'll probably want a hashmap per segment actually so that we can quickly
-        const new_segment = try Segment.init(dest_pathname);
-        defer new_segment.deinit();
+    /// Compacts into a new segment that is stored in the given File and returns it.
+    pub fn compact(self: *Self, file: File) !Segment {
+        var segment = try Segment.init(self.allocator, file);
+        errdefer segment.deinit();
 
-        _ = try self.file.seekTo(0);
+        var entry_iter = self.key_to_value_metadata.iterator();
 
-        while (try self.readHeader()) |header| {
-            switch (header) {
-                .set => |set_header| {
-                    const op_type_buf = [_]u8{@intFromEnum(SegmentOpType.set)};
-                    const key_len_buf: [8]u8 = @bitCast(set_header.key_len);
-                    const value_len_buf: [8]u8 = @bitCast(set_header.value_len);
+        while (entry_iter.next()) |entry| {
+            const header_size = 8 * 2 + 1;
+            const end_pos = try segment.file.getEndPos();
 
-                    var iovecs = [_]std.os.iovec_const{
-                        .{
-                            .iov_base = &op_type_buf,
-                            .iov_len = op_type_buf.len,
-                        },
-                        .{
-                            .iov_base = &key_len_buf,
-                            .iov_len = key_len_buf.len,
-                        },
-                        .{
-                            .iov_base = &value_len_buf,
-                            .iov_len = value_len_buf.len,
-                        },
-                    };
+            // TODO(Apaar): Actually, this isn't necessary because if we just go back from the offset of the value
+            // by key_len + 8 * 2 + 1 we can just do a copyRange starting there.
+            _ = try self.file.copyRangeAll(
+                // We subtract the key len to grab the key, and then the size of the header
+                // and now we can just paste this into the new file.
+                entry.value_ptr.*.offset - entry.key_ptr.*.len - header_size,
+                segment.file,
+                end_pos,
+                header_size + entry.key_ptr.*.len + entry.value_ptr.*.len,
+            );
 
-                    _ = iovecs;
+            const key_buf = try self.allocator.alloc(u8, entry.key_ptr.*.len);
+            @memcpy(key_buf, entry.key_ptr.*);
 
-                    // TODO(Apaar): use copyRangeAll to copy from one segment file to another
-                },
-
-                .del => |del_header| {
-                    _ = del_header;
-                },
-            }
+            try segment.key_to_value_metadata.put(key_buf, ValueMetadata{
+                .len = entry.value_ptr.*.len,
+                .offset = end_pos + header_size + entry.key_ptr.*.len,
+            });
         }
+
+        return segment;
     }
 };
 
 const Store = struct {
+    // TODO(Apaar): Store multiple segments in this dir.
+    dir: std.fs.Dir,
     segment: Segment,
 
     const Self = @This();
 
-    pub fn init(allocator: Allocator, pathname: []const u8) !Self {
-        var segment = try Segment.init(allocator, pathname);
+    /// The store takes ownership of the given `dir`.
+    pub fn init(allocator: Allocator, dir: std.fs.Dir) !Self {
+        var segment = try Segment.init(
+            allocator,
+            try dir.createFile("current.log", .{
+                .truncate = false,
+                .read = true,
+            }),
+        );
         errdefer segment.deinit();
 
         return .{
+            .dir = dir,
             .segment = segment,
         };
     }
 
     pub fn deinit(self: *Self) void {
+        self.dir.close();
         self.segment.deinit();
     }
 
@@ -361,8 +363,28 @@ const Store = struct {
     }
 };
 
+const temp_path_bytes = 12;
+const TempPath = [std.fs.base64_encoder.calcSize(temp_path_bytes)]u8;
+
+fn tempPath() TempPath {
+    var bytes: [temp_path_bytes]u8 = undefined;
+    std.crypto.random.bytes(&bytes);
+
+    var path: TempPath = undefined;
+    _ = std.fs.base64_encoder.encode(&path, &bytes);
+
+    return path;
+}
+
 test "set and get" {
-    var store = try Store.init(std.testing.allocator, "test.log");
+    var dir_path = tempPath();
+    var dir = try std.fs.cwd().makeOpenPath(&dir_path, .{});
+
+    var store = try Store.init(
+        std.testing.allocator,
+        dir,
+    );
+
     defer store.deinit();
 
     try store.setAllocKey("hello", "world");
@@ -376,14 +398,20 @@ test "set and get" {
 }
 
 test "set, close, open, and get" {
+    var dir_path = tempPath();
+
     {
-        var store = try Store.init(std.testing.allocator, "test.log");
+        var dir = try std.fs.cwd().makeOpenPath(&dir_path, .{});
+
+        var store = try Store.init(std.testing.allocator, dir);
         defer store.deinit();
 
         try store.setAllocKey("hello", "world");
     }
 
-    var store = try Store.init(std.testing.allocator, "test.log");
+    var dir = try std.fs.cwd().makeOpenPath(&dir_path, .{});
+
+    var store = try Store.init(std.testing.allocator, dir);
     defer store.deinit();
 
     const proxy = store.get("hello").?;
@@ -395,7 +423,10 @@ test "set, close, open, and get" {
 }
 
 test "set, del, and get" {
-    var store = try Store.init(std.testing.allocator, "test.log");
+    var dir_path = tempPath();
+    var dir = try std.fs.cwd().makeOpenPath(&dir_path, .{});
+
+    var store = try Store.init(std.testing.allocator, dir);
     defer store.deinit();
 
     try store.setAllocKey("hello", "world");
@@ -406,17 +437,56 @@ test "set, del, and get" {
 }
 
 test "set, del, close, open, and get" {
+    var dir_path = tempPath();
+
     {
-        var store = try Store.init(std.testing.allocator, "test.log");
+        var dir = try std.fs.cwd().makeOpenPath(&dir_path, .{});
+
+        var store = try Store.init(std.testing.allocator, dir);
         defer store.deinit();
 
         try store.setAllocKey("hello", "world");
         try std.testing.expect(try store.del("hello"));
     }
 
-    var store = try Store.init(std.testing.allocator, "test.log");
+    var dir = try std.fs.cwd().makeOpenPath(&dir_path, .{});
+
+    var store = try Store.init(std.testing.allocator, dir);
     defer store.deinit();
 
     const proxy = store.get("hello");
     try std.testing.expectEqual(proxy, null);
+}
+
+test "set multiple, compact, and get" {
+    var dir_path = tempPath();
+
+    var store = try Store.init(
+        std.testing.allocator,
+        try std.fs.cwd().makeOpenPath(&dir_path, .{}),
+    );
+
+    defer store.deinit();
+
+    try store.setAllocKey("hello", "world");
+    try store.setAllocKey("hello", "world2");
+    try store.setAllocKey("hello", "world3");
+
+    var dir = try std.fs.cwd().makeOpenPath(&dir_path, .{});
+
+    var new_segment = try store.segment.compact(
+        try dir.createFile(
+            "new.log",
+            .{
+                .truncate = true,
+                .read = true,
+            },
+        ),
+    );
+    defer new_segment.deinit();
+
+    const value = try new_segment.get("hello").?.readAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(value);
+
+    try std.testing.expectEqualStrings(value, "world3");
 }
