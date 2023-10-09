@@ -363,15 +363,18 @@ const Store = struct {
     }
 };
 
+const temp_prefix = "tmp/";
 const temp_path_bytes = 12;
-const TempPath = [std.fs.base64_encoder.calcSize(temp_path_bytes)]u8;
+const TempPath = [temp_prefix.len + std.fs.base64_encoder.calcSize(temp_path_bytes)]u8;
 
 fn tempPath() TempPath {
     var bytes: [temp_path_bytes]u8 = undefined;
     std.crypto.random.bytes(&bytes);
 
     var path: TempPath = undefined;
-    _ = std.fs.base64_encoder.encode(&path, &bytes);
+    @memcpy(path[0..temp_prefix.len], temp_prefix);
+
+    _ = std.fs.base64_encoder.encode(path[temp_prefix.len..], &bytes);
 
     return path;
 }
