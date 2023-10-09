@@ -43,7 +43,7 @@ const ValueProxy = struct {
         const pos = try self.file.getPos();
 
         // Automatically resets the file cursor regardless of whether an error occurred
-        defer self.file.seekTo(pos);
+        defer self.file.seekTo(pos) catch {};
 
         try self.file.seekTo(self.value_metadata.offset);
 
@@ -74,25 +74,87 @@ const SegmentOpHeader = union(SegmentOpType) {
 const Segment = struct {
     allocator: Allocator,
     file: File,
+    key_to_value_metadata: KeyToValueMetadataMap,
 
     const Self = @This();
 
     pub fn init(allocator: Allocator, pathname: []const u8) !Self {
-        const file = try std.fs.cwd().createFile(pathname, .{
-            .truncate = false,
-            .read = true,
-        });
+        var self = Segment{
+            .allocator = allocator,
+            .file = try std.fs.cwd().createFile(pathname, .{
+                .truncate = false,
+                .read = true,
+            }),
+            .key_to_value_metadata = KeyToValueMetadataMap.init(allocator),
+        };
+        errdefer self.deinit();
 
-        return .{ .allocator = allocator, .file = file };
+        var temp_key_buf = std.ArrayList(u8).init(allocator);
+        defer temp_key_buf.deinit();
+
+        while (try self.readHeader()) |header| {
+            switch (header) {
+                .set => |op| {
+                    // Read in the key
+                    try temp_key_buf.resize(op.key_len);
+
+                    _ = try self.file.readAll(temp_key_buf.items);
+
+                    const value_metadata = ValueMetadata{
+                        // We should be at the value now since we read in the key above
+                        .offset = try self.file.getPos(),
+                        .len = op.value_len,
+                    };
+
+                    // Skip over the value
+                    _ = try self.file.seekBy(@intCast(op.value_len));
+
+                    const entry = try self.key_to_value_metadata.getOrPutAdapted(
+                        @as([]const u8, temp_key_buf.items),
+                        self.key_to_value_metadata.ctx,
+                    );
+
+                    if (!entry.found_existing) {
+                        // Copy it into our own non-temp buffer under our allocator
+                        const key_buf = try allocator.alloc(u8, op.key_len);
+                        @memcpy(key_buf, temp_key_buf.items);
+
+                        entry.key_ptr.* = key_buf;
+                    }
+
+                    entry.value_ptr.* = value_metadata;
+                },
+
+                .del => |op| {
+                    // Skip the key
+                    try self.file.seekBy(@intCast(op.key_len));
+
+                    const removed = self.key_to_value_metadata.fetchRemove(temp_key_buf.items);
+
+                    if (removed) |entry| {
+                        // TODO(Apaar): Do not assume we always own the keys
+                        self.allocator.free(entry.key);
+                    }
+                },
+            }
+        }
+
+        return self;
     }
 
     pub fn deinit(self: *Self) void {
+        var key_iter = self.key_to_value_metadata.keyIterator();
+        while (key_iter.next()) |key| {
+            self.allocator.free(key.*);
+        }
+
         self.file.close();
+        self.key_to_value_metadata.deinit();
     }
 
     /// If this returns null, then we're at the end of the segment file so far.
     /// The key and value (if applicable) are placed directly after this header.
-    pub fn readHeader(self: *Self) !?SegmentOpHeader {
+    fn readHeader(self: *Self) !?SegmentOpHeader {
         // TODO(Apaar): Initialize the map with the key and value offsets
         var op_type_key_len_buf: [1 + 8]u8 = undefined;
 
@@ -134,7 +196,19 @@ const Segment = struct {
         }
     }
 
-    pub fn writeSet(self: *Self, key: []const u8, value: []const u8) !ValueMetadata {
+    pub fn get(self: *Self, key: []const u8) ?ValueProxy {
+        var value_metadata = self.key_to_value_metadata.get(key) orelse return null;
+
+        return ValueProxy{
+            .file = &self.file,
+            .value_metadata = value_metadata,
+        };
+    }
+
+    pub fn setAllocKey(self: *Self, key: []const u8, value: []const u8) !void {
+        // Make sure the cursor is at the end of the file
+        std.debug.assert(try self.file.getPos() == try self.file.getEndPos());
+
         const op_type_buf = [_]u8{@intFromEnum(SegmentOpType.set)};
         const key_len_buf: [8]u8 = @bitCast(key.len);
         const value_len_buf: [8]u8 = @bitCast(value.len);
@@ -171,10 +245,26 @@ const Segment = struct {
             .len = value.len,
         };
 
-        return value_metadata;
+        const entry = try self.key_to_value_metadata.getOrPutAdapted(key, self.key_to_value_metadata.ctx);
+
+        if (!entry.found_existing) {
+            var key_copy = try self.allocator.alloc(u8, key.len);
+            @memcpy(key_copy, key);
+
+            entry.key_ptr.* = key_copy;
+        }
+
+        entry.value_ptr.* = value_metadata;
     }
 
-    pub fn writeDel(self: *Self, key: []const u8) !void {
+    pub fn del(self: *Self, key: []const u8) !bool {
+        const removed = self.key_to_value_metadata.fetchRemove(key) orelse return false;
+
+        // TODO(Apaar): Do not assume we always own the keys
+        self.allocator.free(removed.key);
+
+        std.debug.assert(try self.file.getPos() == try self.file.getEndPos());
+
         const op_type_buf = [_]u8{@intFromEnum(SegmentOpType.del)};
         const key_len_buf: [8]u8 = @bitCast(key.len);
 
@@ -194,13 +284,54 @@ const Segment = struct {
         };
 
         try self.file.writevAll(&iovecs);
+
+        return true;
+    }
+
+    pub fn compactInto(self: *Self, dest_pathname: []const u8) !void {
+        // We'll probably want a hashmap per segment actually so that we can quickly
+        const new_segment = try Segment.init(dest_pathname);
+        defer new_segment.deinit();
+
+        _ = try self.file.seekTo(0);
+
+        while (try self.readHeader()) |header| {
+            switch (header) {
+                .set => |set_header| {
+                    const op_type_buf = [_]u8{@intFromEnum(SegmentOpType.set)};
+                    const key_len_buf: [8]u8 = @bitCast(set_header.key_len);
+                    const value_len_buf: [8]u8 = @bitCast(set_header.value_len);
+
+                    var iovecs = [_]std.os.iovec_const{
+                        .{
+                            .iov_base = &op_type_buf,
+                            .iov_len = op_type_buf.len,
+                        },
+                        .{
+                            .iov_base = &key_len_buf,
+                            .iov_len = key_len_buf.len,
+                        },
+                        .{
+                            .iov_base = &value_len_buf,
+                            .iov_len = value_len_buf.len,
+                        },
+                    };
+
+                    _ = iovecs;
+
+                    // TODO(Apaar): use copyRangeAll to copy from one segment file to another
+                },
+
+                .del => |del_header| {
+                    _ = del_header;
+                },
+            }
+        }
     }
 };
 
 const Store = struct {
-    allocator: Allocator,
     segment: Segment,
-    key_to_value_metadata: KeyToValueMetadataMap,
 
     const Self = @This();
 
@@ -208,128 +339,25 @@ const Store = struct {
         var segment = try Segment.init(allocator, pathname);
         errdefer segment.deinit();
 
-        var key_to_value_metadata = KeyToValueMetadataMap.init(allocator);
-        errdefer {
-            var key_iter = key_to_value_metadata.keyIterator();
-            while (key_iter.next()) |key| {
-                allocator.free(key.*);
-            }
-
-            key_to_value_metadata.deinit();
-        }
-
-        var temp_key_buf = std.ArrayList(u8).init(allocator);
-        defer temp_key_buf.deinit();
-
-        while (true) {
-            const header_opt = try segment.readHeader();
-            if (header_opt == null) {
-                break;
-            }
-
-            const header = header_opt.?;
-            switch (header) {
-                .set => |op| {
-                    // Read in the key
-                    try temp_key_buf.resize(op.key_len);
-
-                    _ = try segment.file.readAll(temp_key_buf.items);
-
-                    const value_metadata = ValueMetadata{
-                        // We should be at the value now since we read in the key above
-                        .offset = try segment.file.getPos(),
-                        .len = op.value_len,
-                    };
-
-                    // Skip over the value
-                    _ = try segment.file.seekBy(@intCast(op.value_len));
-
-                    const entry = try key_to_value_metadata.getOrPutAdapted(
-                        @as([]const u8, temp_key_buf.items),
-                        key_to_value_metadata.ctx,
-                    );
-
-                    if (!entry.found_existing) {
-                        // Copy it into our own non-temp buffer under our allocator
-                        const key_buf = try allocator.alloc(u8, op.key_len);
-                        @memcpy(key_buf, temp_key_buf.items);
-
-                        entry.key_ptr.* = key_buf;
-                    }
-
-                    entry.value_ptr.* = value_metadata;
-                },
-
-                .del => |op| {
-                    // Skip the key
-                    try segment.file.seekBy(@intCast(op.key_len));
-
-                    const removed = key_to_value_metadata.fetchRemove(temp_key_buf.items);
-
-                    if (removed) |entry| {
-                        // TODO(Apaar): Do not assume we always own the keys
-                        allocator.free(entry.key);
-                    }
-                },
-            }
-        }
-
         return .{
-            .allocator = allocator,
             .segment = segment,
-            .key_to_value_metadata = key_to_value_metadata,
         };
     }
 
     pub fn deinit(self: *Self) void {
-        var key_iter = self.key_to_value_metadata.keyIterator();
-        while (key_iter.next()) |key| {
-            self.allocator.free(key.*);
-        }
-
-        self.key_to_value_metadata.deinit();
         self.segment.deinit();
     }
 
     pub fn get(self: *Self, key: []const u8) ?ValueProxy {
-        var value_metadata = self.key_to_value_metadata.get(key) orelse return null;
-
-        return ValueProxy{
-            .file = &self.segment.file,
-            .value_metadata = value_metadata,
-        };
+        return self.segment.get(key);
     }
 
     pub fn setAllocKey(self: *Self, key: []const u8, value: []const u8) !void {
-        const value_metadata = try self.segment.writeSet(key, value);
-
-        // TODO(Apaar): Idk why I can have a .{} here for the ctx but if I try to do the same thing in the `init` function
-        // it complains that my context is incomplete.
-        //
-        // Compiler bug?
-        //
-        // Nvm it's complaining again???? Oh it was eliminating the dead code of this function.
-        const entry = try self.key_to_value_metadata.getOrPutAdapted(key, self.key_to_value_metadata.ctx);
-
-        if (!entry.found_existing) {
-            var key_copy = try self.allocator.alloc(u8, key.len);
-            @memcpy(key_copy, key);
-
-            entry.key_ptr.* = key_copy;
-        }
-
-        entry.value_ptr.* = value_metadata;
+        try self.segment.setAllocKey(key, value);
     }
 
     pub fn del(self: *Self, key: []const u8) !bool {
-        const removed = self.key_to_value_metadata.fetchRemove(key) orelse return false;
-
-        // TODO(Apaar): Do not assume we always own the keys
-        self.allocator.free(removed.key);
-
-        try self.segment.writeDel(key);
-
-        return true;
+        return try self.segment.del(key);
     }
 };
 
@@ -344,7 +372,7 @@ test "set and get" {
     var value = try proxy.readAlloc(std.testing.allocator);
     defer std.testing.allocator.free(value);
 
-    std.debug.assert(std.mem.eql(u8, value, "world"));
+    try std.testing.expectEqualStrings(value, "world");
 }
 
 test "set, close, open, and get" {
@@ -363,7 +391,7 @@ test "set, close, open, and get" {
     var value = try proxy.readAlloc(std.testing.allocator);
     defer std.testing.allocator.free(value);
 
-    std.debug.assert(std.mem.eql(u8, value, "world"));
+    try std.testing.expectEqualStrings(value, "world");
 }
 
 test "set, del, and get" {
@@ -371,10 +399,10 @@ test "set, del, and get" {
     defer store.deinit();
 
     try store.setAllocKey("hello", "world");
-    std.debug.assert(try store.del("hello"));
+    try std.testing.expect(try store.del("hello"));
 
     const proxy = store.get("hello");
-    std.debug.assert(proxy == null);
+    try std.testing.expectEqual(proxy, null);
 }
 
 test "set, del, close, open, and get" {
@@ -383,12 +411,12 @@ test "set, del, close, open, and get" {
         defer store.deinit();
 
         try store.setAllocKey("hello", "world");
-        std.debug.assert(try store.del("hello"));
+        try std.testing.expect(try store.del("hello"));
     }
 
     var store = try Store.init(std.testing.allocator, "test.log");
     defer store.deinit();
 
     const proxy = store.get("hello");
-    std.debug.assert(proxy == null);
+    try std.testing.expectEqual(proxy, null);
 }
