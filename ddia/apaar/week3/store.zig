@@ -42,12 +42,13 @@ const ValueProxy = struct {
 
         const pos = try self.file.getPos();
 
+        // Automatically resets the file cursor regardless of whether an error occurred
+        defer self.file.seekTo(pos);
+
         try self.file.seekTo(self.value_metadata.offset);
 
         // TODO(Apaar): Handle EOF case
         _ = try self.file.readAll(out_buf);
-
-        try self.file.seekTo(pos);
 
         return out_buf;
     }
