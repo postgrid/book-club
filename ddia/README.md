@@ -5,6 +5,10 @@ usually sufficient but you can also have a folder for each.
 
 ## Schedule
 
+### Week 4 (Oct 10 - Oct 17)
+
+Use this week to catch up on any missed reading/exercises/bonuses from last week.
+
 ### Week 3 (Oct 3 - Oct 10)
 
 Read up until Column-Oriented Storage on page 95.
