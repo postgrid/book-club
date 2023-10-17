@@ -5,6 +5,30 @@ usually sufficient but you can also have a folder for each.
 
 ## Schedule
 
+### Week 5 (Oct 17 - Oct 24)
+
+Read up until "The Merits of Schemas" on page 127.
+
+#### Exercises
+
+1. Read a CSV file and convert it into a custom column-oriented binary format.
+
+The CSV file itself won't have any schema. The column-oriented format must be set up such that one can
+quickly figure out the AVG of the "Sales" column or something (without loading up all the data into memory).
+
+**Bonus** Convert back from column-oriented format to CSV.
+
+**Bonus 2** Write a CLI that does queries on your column file.
+
+2. For columns which have values with low-cardinality (the set of values you see in the file is less than some
+percentage of the total row count) employ bitmap compression as described on page 97 and 98.
+
+3. Write a function that can generate a data cube from your column-oriented file. See page 102 for an
+example of a data cube.
+
+The idea here is to write a function that loads your column file, takes in another function that processes these columns
+and generates a new column file with preprocessed information. Up to you how you want to implement it.
+
 ### Week 4 (Oct 10 - Oct 17)
 
 Use this week to catch up on any missed reading/exercises/bonuses from last week.
