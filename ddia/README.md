@@ -11,12 +11,23 @@ Read up until "The Merits of Schemas" on page 127.
 
 #### Exercises
 
-1. Read a CSV file and convert it into a custom column-oriented binary format.
+1. Read a set of CSV files and generate a custom column-oriented binary format for fast analytics.
 
 The CSV file itself won't have any schema. The column-oriented format must be set up such that one can
 quickly figure out the AVG of the "Sales" column or something (without loading up all the data into memory).
 
-**Bonus** Convert back from column-oriented format to CSV.
+Example CSV Data:
+
+```CSV
+Date,Employee ID,Product ID,Sold Quantity
+2023-10-23,1,1,100
+2023-10-20,1,2,100
+2023-10-21,1,1,150
+```
+
+You can imagine there are similar CSVs for the product catalog and employees.
+
+**Bonus** Convert back from column-oriented format to CSVs.
 
 **Bonus 2** Write a CLI that does queries on your column file.
 
