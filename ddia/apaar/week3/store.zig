@@ -135,7 +135,7 @@ fn randPath() RandPath {
 
 const Store = struct {
     allocator: Allocator,
-    dir: std.fs.IterableDir,
+    dir_path: []const u8,
     segment_files: std.ArrayList(File),
     max_segment_size: u64,
     key_to_value_metadata: KeyToValueMetadataMap,
@@ -143,10 +143,18 @@ const Store = struct {
     const Self = @This();
 
     /// The store takes ownership of the given `dir`.
-    pub fn init(allocator: Allocator, dir: std.fs.IterableDir, max_segment_size: u64) !Self {
+    pub fn init(allocator: Allocator, dir_path: []const u8, max_segment_size: u64) !Self {
+        var dir_path_copy = try allocator.alloc(u8, dir_path.len);
+        errdefer allocator.free(dir_path_copy);
+
+        @memcpy(dir_path_copy, dir_path);
+
+        var dir = try std.fs.cwd().makeOpenPathIterable(dir_path, .{});
+        defer dir.close();
+
         var self = Self{
             .allocator = allocator,
-            .dir = dir,
+            .dir_path = dir_path_copy,
             .segment_files = std.ArrayList(File).init(allocator),
             .key_to_value_metadata = KeyToValueMetadataMap.init(allocator),
             .max_segment_size = max_segment_size,
@@ -275,7 +283,8 @@ const Store = struct {
         }
 
         self.segment_files.deinit();
-        self.dir.close();
+
+        self.allocator.free(self.dir_path);
     }
 
     pub fn get(self: *Self, key: []const u8) ?ValueProxy {
@@ -344,7 +353,10 @@ const Store = struct {
             // Append a new segment file because this last one is too big
             const path = randPath();
 
-            var new_file = try self.dir.dir.createFile(&path, .{ .read = true });
+            var dir = try std.fs.cwd().openDir(self.dir_path, .{});
+            defer dir.close();
+
+            var new_file = try dir.createFile(&path, .{ .read = true });
             errdefer new_file.close();
 
             try self.segment_files.append(new_file);
@@ -410,6 +422,17 @@ const Store = struct {
     // because the only time we'd lock is very briefly at the end of the compaction.
     //
     // TO BE CONTINUED
+
+    pub fn compactForMillis(self: *Self, ms: u64) !void {
+        var start_time: std.os.timeval = undefined;
+        try std.os.gettimeofday(&start_time, null);
+
+        // We don't want to interact with self.segment_files and self.key_to_value_metadata as much as possible,
+        // so we open our directory again here rather than accessing either of these.
+
+        _ = ms;
+        _ = self;
+    }
 };
 
 const temp_prefix = "tmp/";
@@ -429,9 +452,8 @@ const test_max_segment_size = 16;
 
 test "set and get" {
     var dir_path = tempPath();
-    var dir = try std.fs.cwd().makeOpenPathIterable(&dir_path, .{});
 
-    var store = try Store.init(std.testing.allocator, dir, test_max_segment_size);
+    var store = try Store.init(std.testing.allocator, &dir_path, test_max_segment_size);
 
     defer store.deinit();
 
@@ -449,17 +471,13 @@ test "set, close, open, and get" {
     var dir_path = tempPath();
 
     {
-        var dir = try std.fs.cwd().makeOpenPathIterable(&dir_path, .{});
-
-        var store = try Store.init(std.testing.allocator, dir, test_max_segment_size);
+        var store = try Store.init(std.testing.allocator, &dir_path, test_max_segment_size);
         defer store.deinit();
 
         try store.setAllocKey("hello", "world");
     }
 
-    var dir = try std.fs.cwd().makeOpenPathIterable(&dir_path, .{});
-
-    var store = try Store.init(std.testing.allocator, dir, test_max_segment_size);
+    var store = try Store.init(std.testing.allocator, &dir_path, test_max_segment_size);
     defer store.deinit();
 
     const proxy = store.get("hello").?;
@@ -472,9 +490,8 @@ test "set, close, open, and get" {
 
 test "set, del, and get" {
     var dir_path = tempPath();
-    var dir = try std.fs.cwd().makeOpenPathIterable(&dir_path, .{});
 
-    var store = try Store.init(std.testing.allocator, dir, test_max_segment_size);
+    var store = try Store.init(std.testing.allocator, &dir_path, test_max_segment_size);
     defer store.deinit();
 
     try store.setAllocKey("hello", "world");
@@ -488,18 +505,14 @@ test "set, del, close, open, and get" {
     var dir_path = tempPath();
 
     {
-        var dir = try std.fs.cwd().makeOpenPathIterable(&dir_path, .{});
-
-        var store = try Store.init(std.testing.allocator, dir, test_max_segment_size);
+        var store = try Store.init(std.testing.allocator, &dir_path, test_max_segment_size);
         defer store.deinit();
 
         try store.setAllocKey("hello", "world");
         try std.testing.expect(try store.del("hello"));
     }
 
-    var dir = try std.fs.cwd().makeOpenPathIterable(&dir_path, .{});
-
-    var store = try Store.init(std.testing.allocator, dir, test_max_segment_size);
+    var store = try Store.init(std.testing.allocator, &dir_path, test_max_segment_size);
     defer store.deinit();
 
     const proxy = store.get("hello");
