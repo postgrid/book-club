@@ -5,6 +5,8 @@ const Allocator = std.mem.Allocator;
 const Gpa = std.heap.GeneralPurposeAllocator(.{});
 
 const ValueMetadata = struct {
+    // TODO(Apaar): Rename to segment_file_index
+    segment_files_index: u16,
     offset: u64,
     len: u64,
 };
@@ -32,29 +34,33 @@ const KeyToValueMetadataMap = std.StringHashMap(ValueMetadata);
 // returns. So we'll have only as many references to the original segment file as there were ValueProxies
 // that called `get` in parallel; a number which is limited in practice by the number of cores on the machine.
 const ValueProxy = struct {
-    file: *File,
-    value_metadata: ValueMetadata,
+    store: *Store,
+    segment_file_index: u16,
+    offset: u64,
+    len: u64,
 
     const Self = @This();
 
     pub fn readInto(self: *const Self, out_buf: []u8) ![]u8 {
-        std.debug.assert(out_buf.len == self.value_metadata.len);
+        std.debug.assert(out_buf.len == self.len);
 
-        const pos = try self.file.getPos();
+        var file = &self.store.segment_files.items[self.segment_file_index];
+
+        const pos = try file.getPos();
 
         // Automatically resets the file cursor regardless of whether an error occurred
-        defer self.file.seekTo(pos) catch {};
+        defer file.seekTo(pos) catch {};
 
-        try self.file.seekTo(self.value_metadata.offset);
+        try file.seekTo(self.offset);
 
-        // TODO(Apaar): Handle EOF case
-        _ = try self.file.readAll(out_buf);
+        const count = try file.readAll(out_buf);
+        std.debug.assert(count == out_buf.len);
 
         return out_buf;
     }
 
     pub fn readAlloc(self: *const Self, allocator: Allocator) ![]u8 {
-        const buf = try allocator.alloc(u8, self.value_metadata.len);
+        const buf = try allocator.alloc(u8, self.len);
         return self.readInto(buf);
     }
 };
@@ -71,69 +77,184 @@ const SegmentOpHeader = union(SegmentOpType) {
     },
 };
 
-const Segment = struct {
+pub fn readSegmentOpHeader(file: *File) !?SegmentOpHeader {
+    // TODO(Apaar): Initialize the map with the key and value offsets
+    var op_type_key_len_buf: [1 + 8]u8 = undefined;
+
+    const count = try file.readAll(&op_type_key_len_buf);
+
+    if (count == 0) {
+        return null;
+    }
+
+    const op_type: SegmentOpType = @enumFromInt(op_type_key_len_buf[0]);
+
+    var key_len_buf: [8]u8 align(@alignOf(u64)) = undefined;
+    @memcpy(&key_len_buf, op_type_key_len_buf[1..]);
+
+    const key_len: u64 = @bitCast(key_len_buf);
+
+    switch (op_type) {
+        .set => {
+            var value_len_buf: [8]u8 = undefined;
+            _ = try file.readAll(&value_len_buf);
+
+            const value_len: u64 = @bitCast(value_len_buf);
+
+            return .{
+                .set = .{
+                    .key_len = key_len,
+                    .value_len = value_len,
+                },
+            };
+        },
+
+        .del => {
+            return .{
+                .del = .{
+                    .key_len = key_len,
+                },
+            };
+        },
+    }
+}
+
+const rand_path_bytes = 12;
+const rand_path_len = std.fs.base64_encoder.calcSize(rand_path_bytes);
+const RandPath = [rand_path_len]u8;
+
+fn randPath() RandPath {
+    var bytes: [rand_path_bytes]u8 = undefined;
+    std.crypto.random.bytes(&bytes);
+
+    var path: RandPath = undefined;
+    _ = std.fs.base64_encoder.encode(&path, &bytes);
+
+    return path;
+}
+
+const Store = struct {
     allocator: Allocator,
-    file: File,
+    dir: std.fs.IterableDir,
+    segment_files: std.ArrayList(File),
+    max_segment_size: u64,
     key_to_value_metadata: KeyToValueMetadataMap,
 
     const Self = @This();
 
-    /// `file` must be opened in read-write mode.
-    pub fn init(allocator: Allocator, file: File) !Self {
-        var self = Segment{
+    /// The store takes ownership of the given `dir`.
+    pub fn init(allocator: Allocator, dir: std.fs.IterableDir, max_segment_size: u64) !Self {
+        var self = Self{
             .allocator = allocator,
-            .file = file,
+            .dir = dir,
+            .segment_files = std.ArrayList(File).init(allocator),
             .key_to_value_metadata = KeyToValueMetadataMap.init(allocator),
+            .max_segment_size = max_segment_size,
         };
+
         errdefer self.deinit();
+
+        var dir_iter = dir.iterate();
+
+        // Load up every file in the directory
+        while (try dir_iter.next()) |entry| {
+            switch (entry.kind) {
+                .file => {
+                    try self.segment_files.append(
+                        // TODO(Apaar): Open every file as read only and then re-open as read-write below
+                        try dir.dir.openFile(entry.name, .{ .mode = .read_write }),
+                    );
+                },
+                else => {},
+            }
+        }
+
+        // Find the smallest segment file that's below the threshold and then work on that; if none is found,
+        // create one.
+        //
+        // The active segment file will always be the last one in the list.
+
+        var min_size = max_segment_size;
+        var smallest_segment_file_index: i32 = -1;
+
+        for (self.segment_files.items, 0..) |segment_file, i| {
+            const size = try segment_file.getEndPos();
+
+            if (size < min_size) {
+                smallest_segment_file_index = @intCast(i);
+            }
+        }
+
+        if (smallest_segment_file_index < 0) {
+            const path = randPath();
+
+            var file = try dir.dir.createFile(&path, .{ .read = true });
+            errdefer file.close();
+
+            try self.segment_files.append(file);
+        } else if (smallest_segment_file_index != self.segment_files.items.len - 1) {
+            // Swap the smallest file to the end of the array
+            std.mem.swap(
+                File,
+                &self.segment_files.items[@intCast(smallest_segment_file_index)],
+                &self.segment_files.items[self.segment_files.items.len - 1],
+            );
+        }
 
         var temp_key_buf = std.ArrayList(u8).init(allocator);
         defer temp_key_buf.deinit();
 
-        while (try self.readHeader()) |header| {
-            switch (header) {
-                .set => |op| {
-                    // Read in the key
-                    try temp_key_buf.resize(op.key_len);
+        // Go through every segment op in every segment file and fill up our
+        // key value metadata.
+        for (self.segment_files.items, 0..) |*segment_file, segment_file_index| {
+            while (try readSegmentOpHeader(segment_file)) |header| {
+                switch (header) {
+                    .set => |op| {
+                        // Read in the key
+                        try temp_key_buf.resize(op.key_len);
 
-                    _ = try self.file.readAll(temp_key_buf.items);
+                        _ = try segment_file.readAll(temp_key_buf.items);
 
-                    const value_metadata = ValueMetadata{
-                        // We should be at the value now since we read in the key above
-                        .offset = try self.file.getPos(),
-                        .len = op.value_len,
-                    };
+                        const value_metadata = ValueMetadata{
+                            // We should be at the value now since we read in the key above
+                            .offset = try segment_file.getPos(),
+                            .len = op.value_len,
+                            .segment_files_index = @intCast(segment_file_index),
+                        };
 
-                    // Skip over the value
-                    _ = try self.file.seekBy(@intCast(op.value_len));
+                        // Skip over the value
+                        _ = try segment_file.seekBy(@intCast(op.value_len));
 
-                    const entry = try self.key_to_value_metadata.getOrPutAdapted(
-                        @as([]const u8, temp_key_buf.items),
-                        self.key_to_value_metadata.ctx,
-                    );
+                        const entry = try self.key_to_value_metadata.getOrPutAdapted(
+                            @as([]const u8, temp_key_buf.items),
+                            self.key_to_value_metadata.ctx,
+                        );
 
-                    if (!entry.found_existing) {
-                        // Copy it into our own non-temp buffer under our allocator
-                        const key_buf = try allocator.alloc(u8, op.key_len);
-                        @memcpy(key_buf, temp_key_buf.items);
+                        if (!entry.found_existing) {
+                            // Copy it into our own non-temp buffer under our allocator
+                            const key_buf = try allocator.alloc(u8, op.key_len);
+                            @memcpy(key_buf, temp_key_buf.items);
 
-                        entry.key_ptr.* = key_buf;
-                    }
+                            entry.key_ptr.* = key_buf;
+                        }
 
-                    entry.value_ptr.* = value_metadata;
-                },
+                        entry.value_ptr.* = value_metadata;
+                    },
 
-                .del => |op| {
-                    // Skip the key
-                    try self.file.seekBy(@intCast(op.key_len));
+                    .del => |op| {
+                        // Read in the key
+                        try temp_key_buf.resize(op.key_len);
 
-                    const removed = self.key_to_value_metadata.fetchRemove(temp_key_buf.items);
+                        _ = try segment_file.readAll(temp_key_buf.items);
 
-                    if (removed) |entry| {
-                        // TODO(Apaar): Do not assume we always own the keys
-                        self.allocator.free(entry.key);
-                    }
-                },
+                        const removed = self.key_to_value_metadata.fetchRemove(temp_key_buf.items);
+
+                        if (removed) |entry| {
+                            // TODO(Apaar): Do not assume we always own the keys
+                            self.allocator.free(entry.key);
+                        }
+                    },
+                }
             }
         }
 
@@ -141,71 +262,35 @@ const Segment = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        var key_iter = self.key_to_value_metadata.keyIterator();
-        while (key_iter.next()) |key| {
-            self.allocator.free(key.*);
+        var entry_iter = self.key_to_value_metadata.iterator();
+
+        while (entry_iter.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
         }
 
-        self.file.close();
         self.key_to_value_metadata.deinit();
-    }
 
-    /// If this returns null, then we're at the end of the segment file so far.
-    /// The key and value (if applicable) are placed directly after this header.
-    fn readHeader(self: *Self) !?SegmentOpHeader {
-        // TODO(Apaar): Initialize the map with the key and value offsets
-        var op_type_key_len_buf: [1 + 8]u8 = undefined;
-
-        const count = try self.file.readAll(&op_type_key_len_buf);
-
-        if (count == 0) {
-            return null;
+        for (self.segment_files.items) |*segment_file| {
+            segment_file.close();
         }
 
-        const op_type: SegmentOpType = @enumFromInt(op_type_key_len_buf[0]);
-
-        var key_len_buf: [8]u8 align(@alignOf(u64)) = undefined;
-        @memcpy(&key_len_buf, op_type_key_len_buf[1..]);
-
-        const key_len: u64 = @bitCast(key_len_buf);
-
-        switch (op_type) {
-            .set => {
-                var value_len_buf: [8]u8 = undefined;
-                _ = try self.file.readAll(&value_len_buf);
-
-                const value_len: u64 = @bitCast(value_len_buf);
-
-                return .{
-                    .set = .{
-                        .key_len = key_len,
-                        .value_len = value_len,
-                    },
-                };
-            },
-
-            .del => {
-                return .{
-                    .del = .{
-                        .key_len = key_len,
-                    },
-                };
-            },
-        }
+        self.segment_files.deinit();
+        self.dir.close();
     }
 
     pub fn get(self: *Self, key: []const u8) ?ValueProxy {
-        var value_metadata = self.key_to_value_metadata.get(key) orelse return null;
+        const value_metadata = self.key_to_value_metadata.get(key) orelse return null;
 
-        return ValueProxy{
-            .file = &self.file,
-            .value_metadata = value_metadata,
+        return .{
+            .store = self,
+            .segment_file_index = value_metadata.segment_files_index,
+            .offset = value_metadata.offset,
+            .len = value_metadata.len,
         };
     }
 
     pub fn setAllocKey(self: *Self, key: []const u8, value: []const u8) !void {
-        // Make sure the cursor is at the end of the file
-        std.debug.assert(try self.file.getPos() == try self.file.getEndPos());
+        var file = self.segment_files.items[self.segment_files.items.len - 1];
 
         const op_type_buf = [_]u8{@intFromEnum(SegmentOpType.set)};
         const key_len_buf: [8]u8 = @bitCast(key.len);
@@ -234,13 +319,14 @@ const Segment = struct {
             },
         };
 
-        const pos = try self.file.getPos();
+        const pos = try file.getPos();
 
-        try self.file.writevAll(&iovecs);
+        try file.writevAll(&iovecs);
 
         const value_metadata = ValueMetadata{
             .offset = pos + op_type_buf.len + key_len_buf.len + value_len_buf.len + key.len,
             .len = value.len,
+            .segment_files_index = @intCast(self.segment_files.items.len - 1),
         };
 
         const entry = try self.key_to_value_metadata.getOrPutAdapted(key, self.key_to_value_metadata.ctx);
@@ -253,15 +339,27 @@ const Segment = struct {
         }
 
         entry.value_ptr.* = value_metadata;
+
+        if (value_metadata.offset + value.len > self.max_segment_size) {
+            // Append a new segment file because this last one is too big
+            const path = randPath();
+
+            var new_file = try self.dir.dir.createFile(&path, .{ .read = true });
+            errdefer new_file.close();
+
+            try self.segment_files.append(new_file);
+        }
     }
 
     pub fn del(self: *Self, key: []const u8) !bool {
+        // We do not record a delete operation if the key does not exist because that means a delete
+        // operation was already recorded prior.
         const removed = self.key_to_value_metadata.fetchRemove(key) orelse return false;
 
         // TODO(Apaar): Do not assume we always own the keys
         self.allocator.free(removed.key);
 
-        std.debug.assert(try self.file.getPos() == try self.file.getEndPos());
+        var file = self.segment_files.items[self.segment_files.items.len - 1];
 
         const op_type_buf = [_]u8{@intFromEnum(SegmentOpType.del)};
         const key_len_buf: [8]u8 = @bitCast(key.len);
@@ -281,112 +379,59 @@ const Segment = struct {
             },
         };
 
-        try self.file.writevAll(&iovecs);
+        try file.writevAll(&iovecs);
 
         return true;
     }
 
-    /// Compacts into a new segment that is stored in the given File and returns it.
-    pub fn compact(self: *Self, file: File) !Segment {
-        var segment = try Segment.init(self.allocator, file);
-        errdefer segment.deinit();
-
-        var entry_iter = self.key_to_value_metadata.iterator();
-
-        while (entry_iter.next()) |entry| {
-            const header_size = 8 * 2 + 1;
-            const end_pos = try segment.file.getEndPos();
-
-            // TODO(Apaar): Actually, this isn't necessary because if we just go back from the offset of the value
-            // by key_len + 8 * 2 + 1 we can just do a copyRange starting there.
-            _ = try self.file.copyRangeAll(
-                // We subtract the key len to grab the key, and then the size of the header
-                // and now we can just paste this into the new file.
-                entry.value_ptr.*.offset - entry.key_ptr.*.len - header_size,
-                segment.file,
-                end_pos,
-                header_size + entry.key_ptr.*.len + entry.value_ptr.*.len,
-            );
-
-            const key_buf = try self.allocator.alloc(u8, entry.key_ptr.*.len);
-            @memcpy(key_buf, entry.key_ptr.*);
-
-            try segment.key_to_value_metadata.put(key_buf, ValueMetadata{
-                .len = entry.value_ptr.*.len,
-                .offset = end_pos + header_size + entry.key_ptr.*.len,
-            });
-        }
-
-        return segment;
-    }
-};
-
-const Store = struct {
-    // TODO(Apaar): Store multiple segments in this dir.
-    dir: std.fs.Dir,
-    segment: Segment,
-
-    const Self = @This();
-
-    /// The store takes ownership of the given `dir`.
-    pub fn init(allocator: Allocator, dir: std.fs.Dir) !Self {
-        var segment = try Segment.init(
-            allocator,
-            try dir.createFile("current.log", .{
-                .truncate = false,
-                .read = true,
-            }),
-        );
-        errdefer segment.deinit();
-
-        return .{
-            .dir = dir,
-            .segment = segment,
-        };
-    }
-
-    pub fn deinit(self: *Self) void {
-        self.dir.close();
-        self.segment.deinit();
-    }
-
-    pub fn get(self: *Self, key: []const u8) ?ValueProxy {
-        return self.segment.get(key);
-    }
-
-    pub fn setAllocKey(self: *Self, key: []const u8, value: []const u8) !void {
-        try self.segment.setAllocKey(key, value);
-    }
-
-    pub fn del(self: *Self, key: []const u8) !bool {
-        return try self.segment.del(key);
-    }
+    // TODO(Apaar): Implement compaction. Just pick a random segment that's not the last segment
+    // and compact it? Or maybe we should just have each compaction run as eagerly as possible? Try
+    // to compact and merge as many segments as possible:
+    //
+    // - Create a hashtable just for processing our compaction.
+    // - Loop through every non-active segment file (i.e. everything except the last segment) and
+    // build up this hash table same as our init function for this store. We can avoid allocating and
+    // copying new keys if we're willing to lock our `self.key_to_value_metadata` map and look up new keys.
+    //
+    // The whole point of this is to avoid locking at all during compaction otherwise
+    // I'd just loop through our existing hashtable.
+    //
+    // Let's say we just copy keys. It's a little memory intensive but we might be able to do a thing where
+    // if we're about to run out of memory we just dump our hashtable so far.
+    //
+    // Anyways we build up this hash table and then we can iterate through it, ...
+    //
+    // Well, regardless of what we do, I don't want to lock our main hash table ever. How can we avoid this?
+    // I guess I could use a pointer to refer to the hash table, and then swap out that pointer atomically
+    // once we've built up a new hashtable that has compacted data. We'd still need to do an atomic read of that
+    // table but that's probably better than locking.
+    //
+    // I wanna see what the perf of an uncontended lock vs an atomic load is. Maybe it's not worth the complexity
+    // because the only time we'd lock is very briefly at the end of the compaction.
+    //
+    // TO BE CONTINUED
 };
 
 const temp_prefix = "tmp/";
-const temp_path_bytes = 12;
-const TempPath = [temp_prefix.len + std.fs.base64_encoder.calcSize(temp_path_bytes)]u8;
+const TempPath = [temp_prefix.len + rand_path_len]u8;
 
 fn tempPath() TempPath {
-    var bytes: [temp_path_bytes]u8 = undefined;
-    std.crypto.random.bytes(&bytes);
-
     var path: TempPath = undefined;
     @memcpy(path[0..temp_prefix.len], temp_prefix);
 
-    _ = std.fs.base64_encoder.encode(path[temp_prefix.len..], &bytes);
+    var rand_path = randPath();
+    @memcpy(path[temp_prefix.len..], &rand_path);
 
     return path;
 }
 
+const test_max_segment_size = 16;
+
 test "set and get" {
     var dir_path = tempPath();
-    var dir = try std.fs.cwd().makeOpenPath(&dir_path, .{});
+    var dir = try std.fs.cwd().makeOpenPathIterable(&dir_path, .{});
 
-    var store = try Store.init(
-        std.testing.allocator,
-        dir,
-    );
+    var store = try Store.init(std.testing.allocator, dir, test_max_segment_size);
 
     defer store.deinit();
 
@@ -397,24 +442,24 @@ test "set and get" {
     var value = try proxy.readAlloc(std.testing.allocator);
     defer std.testing.allocator.free(value);
 
-    try std.testing.expectEqualStrings(value, "world");
+    try std.testing.expectEqualStrings("world", value);
 }
 
 test "set, close, open, and get" {
     var dir_path = tempPath();
 
     {
-        var dir = try std.fs.cwd().makeOpenPath(&dir_path, .{});
+        var dir = try std.fs.cwd().makeOpenPathIterable(&dir_path, .{});
 
-        var store = try Store.init(std.testing.allocator, dir);
+        var store = try Store.init(std.testing.allocator, dir, test_max_segment_size);
         defer store.deinit();
 
         try store.setAllocKey("hello", "world");
     }
 
-    var dir = try std.fs.cwd().makeOpenPath(&dir_path, .{});
+    var dir = try std.fs.cwd().makeOpenPathIterable(&dir_path, .{});
 
-    var store = try Store.init(std.testing.allocator, dir);
+    var store = try Store.init(std.testing.allocator, dir, test_max_segment_size);
     defer store.deinit();
 
     const proxy = store.get("hello").?;
@@ -422,14 +467,14 @@ test "set, close, open, and get" {
     var value = try proxy.readAlloc(std.testing.allocator);
     defer std.testing.allocator.free(value);
 
-    try std.testing.expectEqualStrings(value, "world");
+    try std.testing.expectEqualStrings("world", value);
 }
 
 test "set, del, and get" {
     var dir_path = tempPath();
-    var dir = try std.fs.cwd().makeOpenPath(&dir_path, .{});
+    var dir = try std.fs.cwd().makeOpenPathIterable(&dir_path, .{});
 
-    var store = try Store.init(std.testing.allocator, dir);
+    var store = try Store.init(std.testing.allocator, dir, test_max_segment_size);
     defer store.deinit();
 
     try store.setAllocKey("hello", "world");
@@ -443,53 +488,20 @@ test "set, del, close, open, and get" {
     var dir_path = tempPath();
 
     {
-        var dir = try std.fs.cwd().makeOpenPath(&dir_path, .{});
+        var dir = try std.fs.cwd().makeOpenPathIterable(&dir_path, .{});
 
-        var store = try Store.init(std.testing.allocator, dir);
+        var store = try Store.init(std.testing.allocator, dir, test_max_segment_size);
         defer store.deinit();
 
         try store.setAllocKey("hello", "world");
         try std.testing.expect(try store.del("hello"));
     }
 
-    var dir = try std.fs.cwd().makeOpenPath(&dir_path, .{});
+    var dir = try std.fs.cwd().makeOpenPathIterable(&dir_path, .{});
 
-    var store = try Store.init(std.testing.allocator, dir);
+    var store = try Store.init(std.testing.allocator, dir, test_max_segment_size);
     defer store.deinit();
 
     const proxy = store.get("hello");
-    try std.testing.expectEqual(proxy, null);
-}
-
-test "set multiple, compact, and get" {
-    var dir_path = tempPath();
-
-    var store = try Store.init(
-        std.testing.allocator,
-        try std.fs.cwd().makeOpenPath(&dir_path, .{}),
-    );
-
-    defer store.deinit();
-
-    try store.setAllocKey("hello", "world");
-    try store.setAllocKey("hello", "world2");
-    try store.setAllocKey("hello", "world3");
-
-    var dir = try std.fs.cwd().makeOpenPath(&dir_path, .{});
-
-    var new_segment = try store.segment.compact(
-        try dir.createFile(
-            "new.log",
-            .{
-                .truncate = true,
-                .read = true,
-            },
-        ),
-    );
-    defer new_segment.deinit();
-
-    const value = try new_segment.get("hello").?.readAlloc(std.testing.allocator);
-    defer std.testing.allocator.free(value);
-
-    try std.testing.expectEqualStrings(value, "world3");
+    try std.testing.expectEqual(@as(?ValueProxy, null), proxy);
 }
