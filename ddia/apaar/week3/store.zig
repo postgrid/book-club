@@ -133,6 +133,13 @@ fn randPath() RandPath {
     return path;
 }
 
+fn timeInMillis() !u64 {
+    var tv: std.os.timeval = undefined;
+    try std.os.gettimeofday(&tv, null);
+
+    return tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+
 const Store = struct {
     allocator: Allocator,
     dir_path: []const u8,
@@ -166,15 +173,12 @@ const Store = struct {
 
         // Load up every file in the directory
         while (try dir_iter.next()) |entry| {
-            switch (entry.kind) {
-                .file => {
-                    try self.segment_files.append(
-                        // TODO(Apaar): Open every file as read only and then re-open as read-write below
-                        try dir.dir.openFile(entry.name, .{ .mode = .read_write }),
-                    );
-                },
-                else => {},
-            }
+            std.debug.assert(entry.kind == .file);
+
+            try self.segment_files.append(
+                // TODO(Apaar): Open every file as read only and then re-open as read-write below
+                try dir.dir.openFile(entry.name, .{ .mode = .read_write }),
+            );
         }
 
         // Find the smallest segment file that's below the threshold and then work on that; if none is found,
@@ -424,14 +428,92 @@ const Store = struct {
     // TO BE CONTINUED
 
     pub fn compactForMillis(self: *Self, ms: u64) !void {
-        var start_time: std.os.timeval = undefined;
-        try std.os.gettimeofday(&start_time, null);
+        const start_time = timeInMillis();
 
         // We don't want to interact with self.segment_files and self.key_to_value_metadata as much as possible,
         // so we open our directory again here rather than accessing either of these.
+        var dir = try std.fs.cwd().makeOpenPathIterable(self.dir_path, .{});
+        defer dir.close();
 
-        _ = ms;
-        _ = self;
+        var dir_iter = dir.iterate();
+
+        // Append all the compacted stuff into a single file as much as possible, no need to care about
+        // max_segment_size for an "inactive" segment.
+        const compact_file_path = randPath();
+
+        var compacted_file = try dir.dir.openFile(&compact_file_path, .{
+            .mode = .write_only,
+        });
+        _ = compacted_file;
+
+        var temp_key_buf = std.ArrayList(u8).init(self.allocator);
+        defer temp_key_buf.deinit();
+
+        while (try dir_iter.next()) |entry| {
+            const cur_time = timeInMillis();
+
+            if (cur_time - start_time >= ms) {
+                break;
+            }
+
+            // TODO(Apaar): Do not assume the nested files are always regular files
+            std.debug.assert(entry.kind == .file);
+
+            var file = try dir.dir.openFile(entry.name, File.OpenFlags{ .mode = .read_only });
+
+            var key_to_value_metadata = KeyToValueMetadataMap.init(self.allocator);
+            _ = key_to_value_metadata;
+
+            while (try readSegmentOpHeader(&file)) |header| {
+                switch (header) {
+                    .set => |op| {
+                        // Read in the key
+                        try temp_key_buf.resize(op.key_len);
+
+                        _ = try file.readAll(temp_key_buf.items);
+
+                        const value_metadata = ValueMetadata{
+                            // We should be at the value now since we read in the key above
+                            .offset = try segment_file.getPos(),
+                            .len = op.value_len,
+                            .segment_files_index = 0,
+                        };
+
+                        // Skip over the value
+                        _ = try segment_file.seekBy(@intCast(op.value_len));
+
+                        const entry = try self.key_to_value_metadata.getOrPutAdapted(
+                            @as([]const u8, temp_key_buf.items),
+                            self.key_to_value_metadata.ctx,
+                        );
+
+                        if (!entry.found_existing) {
+                            // Copy it into our own non-temp buffer under our allocator
+                            const key_buf = try allocator.alloc(u8, op.key_len);
+                            @memcpy(key_buf, temp_key_buf.items);
+
+                            entry.key_ptr.* = key_buf;
+                        }
+
+                        entry.value_ptr.* = value_metadata;
+                    },
+
+                    .del => |op| {
+                        // Read in the key
+                        try temp_key_buf.resize(op.key_len);
+
+                        _ = try segment_file.readAll(temp_key_buf.items);
+
+                        const removed = self.key_to_value_metadata.fetchRemove(temp_key_buf.items);
+
+                        if (removed) |entry| {
+                            // TODO(Apaar): Do not assume we always own the keys
+                            self.allocator.free(entry.key);
+                        }
+                    },
+                } 
+            }
+        }
     }
 };
 
