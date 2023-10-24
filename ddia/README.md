@@ -5,6 +5,10 @@ usually sufficient but you can also have a folder for each.
 
 ## Schedule
 
+### Week 6 (Oct 24 - Oct 31)
+
+Catch up on previous weeks exercises and readings.
+
 ### Week 5 (Oct 17 - Oct 24)
 
 Read up until "The Merits of Schemas" on page 127.
