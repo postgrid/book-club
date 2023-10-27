@@ -1,220 +1,211 @@
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+
 #include <string.h>
-#include <stdbool.h>
+#include <limits.h>
 
-// Store data in binary like
-// key1:value1
-// key2:value2
-//
-// TODO add checksum with key1:value1:checksum1
-const char KEY_SEP = ':';
-const char VALUE_SEP = '\n';
-const char ESCAPE = '\\';
-const char DELETED = '\0';
+#include "file-index-map.h"
+#include "hash.h"
 
-typedef struct
+typedef enum DBError
 {
-    char *data;
-    size_t len;
-} Buffer;
+    DB_OKAY = 0U,
+    DB_FILE_ERROR = 1U
+} DBError;
 
-typedef struct
-{
-    size_t start;
-    size_t len;
-} FileIndex;
+/**
+ * To resume course after a failed checksum,
+ * a random indicator is used before every key-value
+ * pair. The program should seek this value from
+ * within the file before the first key-value pair
+ * as well as after any checksum failures.
+ *
+ * I could make more bytes for lower collision chance
+ * I'm satisfied with 2^64 corruption errors required.
+ * Also avoid spinning up 2^64 DBs if that's possible
+ *
+ */
+typedef size_t __indicator_t;
+const __indicator_t INDICATOR = 0x1725394551607083UL;
 
-// FIXME
-typedef struct
-{
-} FileIndexHashMap;
+typedef __uint8_t __keysize_t;
+const size_t MAX_KEY_SIZE = (1UL << (CHAR_BIT * sizeof(__keysize_t))) - 1UL;
 
-void SetIndex(FileIndexHashMap map, char *key, FileIndex index);
-FileIndex GetIndex(FileIndexHashMap map, char *key);
-void DeleteIndex(FileIndexHashMap map, char *key);
+const size_t PREFIX_SIZE = sizeof(__indicator_t) + sizeof(__keysize_t) + sizeof(size_t);
 
-typedef struct
+/**
+ * Store data in the following format:
+ * [INDICATOR]{INDICATOR_SIZE}
+ * [keySize]{sizeof(__keysize_t)}
+ * [valueSize]{sizeof(size_t)}
+ * [key]{keySize}
+ * [value]{valueSize}
+ * [checksum]{CHECKSUM_SIZE}
+ * NOTE key is always a string (null-terminated)
+ **/
+
+typedef struct DB
 {
     FileIndexHashMap map;
     char *handle;
     FILE *file;
+    DBError error;
 } DB;
 
-DB *open(char *handle)
+/**
+ * Consumes a pointer to a FILE and iterates
+ * through looking for bytes matching the INDICATOR.
+ *
+ * Returns any error codes from file operations
+ */
+int _seekIndicator(FILE *file)
 {
-    // FIXME
-    FileIndexHashMap map;
+    const size_t readSize = sizeof(__indicator_t) * 1024UL;
+    const size_t previousDataSize = sizeof(__indicator_t) - 1;
+    const size_t bufferSize = readSize + previousDataSize;
+    char *buffer = calloc(sizeof(char), bufferSize);
+
+    long position = 0;
+
+    while (true)
+    {
+        // Copy end of previous buffer to start
+        if (position)
+        {
+            memcpy(buffer, buffer + readSize, previousDataSize);
+        }
+        size_t expectedBytesRead = position ? readSize : bufferSize;
+
+        size_t bytesRead = fread(
+            position
+                ? buffer + previousDataSize
+                : buffer,
+            sizeof(char),
+            expectedBytesRead,
+            file);
+
+        if (bytesRead < expectedBytesRead && ferror(file))
+        {
+            return ferror(file);
+        }
+
+        __indicator_t testBytes;
+        for (long i = 0L; i < bytesRead; ++i)
+        {
+            memcpy(&testBytes, buffer + i, sizeof(__indicator_t));
+
+            if (testBytes == INDICATOR)
+            {
+                long offset = position + i;
+                // Account for data from previous read
+                if (position)
+                {
+                    offset -= previousDataSize;
+                }
+                // Skip directly to the key
+                offset += sizeof(__indicator_t);
+                // Undo reading of last set of bytes
+                offset -= bytesRead;
+                return fseek(file, offset, SEEK_CUR);
+            }
+        }
+
+        // This should be an EOF
+        if (bytesRead < expectedBytesRead)
+        {
+            break;
+        }
+
+        position += bytesRead;
+    }
+
+    return -1;
+}
+
+DB DBopen(char *handle)
+{
+    DB db;
+
+    // FIXME initialize file index map
 
     FILE *file = fopen(handle, "r");
 
     if (!file)
     {
-        fclose(file);
-        return NULL;
+        db.error = DB_FILE_ERROR;
+        return db;
     }
 
-    size_t readBytes;
-    size_t totalReadBytes;
-    const size_t chunkSize = 100;
-    char chunk[100];
-    char prevChar;
+    _seekIndicator(file);
 
-    size_t keyStart;
-    size_t keySize = 0;
-    bool nullTerminatingKey = false;
-
-    size_t valueStart;
-    size_t valueSize = 0;
-
-    // TODO account for checksum
-    bool keyMode = true;
-
-    bool escapeMode = false;
-
-    do
+    char keyValueSizes[sizeof(__keysize_t) + sizeof(size_t)];
+    long currentKeyValuePos = ftell(file);
+    while (fread(keyValueSizes, sizeof(char), sizeof(keyValueSizes), file) == sizeof(keyValueSizes))
     {
-        readBytes = fread(chunk, sizeof(char), chunkSize, file);
+        __keysize_t keySize;
+        memcpy(&keySize, keyValueSizes, sizeof(keySize));
 
-        if (ferror(file))
+        size_t valueSize;
+        memcpy(&valueSize, keyValueSizes + sizeof(keySize), sizeof(size_t));
+
+        char *keyValueData = malloc(sizeof(char) * (valueSize + keySize));
+        fread(keyValueData, sizeof(char), valueSize + keySize, file);
+
+        char *key = malloc(sizeof(char) * keySize);
+        memcpy(key, keyValueData, keySize);
+
+        const __hash_t hash = Hash(keyValueData, keySize + valueSize);
+        const __hash_t checksum;
+        fread(&checksum, sizeof(__hash_t), 1UL, file);
+
+        if (hash == checksum)
         {
-            fclose(file);
-            return NULL;
-        }
+            FileIndex index;
+            index.start =
+                currentKeyValuePos + PREFIX_SIZE + keySize;
+            index.len = valueSize;
 
-        for (int i = 0; i < readBytes; ++i)
-        {
-            const char currentChar = chunk[i];
-            ++totalReadBytes;
-
-            if (keyMode && currentChar == KEY_SEP && !escapeMode)
+            if (index.len)
             {
-                keyMode = false;
-                valueStart = totalReadBytes;
-                valueSize = 0;
-
-                continue;
-            }
-
-            if (!keyMode && currentChar == VALUE_SEP && !escapeMode)
-            {
-                if (fseek(file, keyStart, SEEK_SET))
-                {
-                    fclose(file);
-                    return NULL;
-                }
-
-                // TODO filter key for escaped value
-                char *key = malloc(sizeof(char) * (nullTerminatingKey
-                                                       ? keySize
-                                                       : keySize + 1));
-
-                if (keySize != fread(key, sizeof(char), keySize, file))
-                {
-                    free(key);
-                    fclose(file);
-                    return NULL;
-                }
-
-                if (!nullTerminatingKey)
-                {
-                    key[keySize] = '\0';
-                }
-
-                if (fseek(file, keySize, SEEK_CUR))
-                {
-                    fclose(file);
-                    return NULL;
-                }
-
-                FileIndex index = {valueStart, valueSize};
-
-                SetIndex(map, key, index);
-
-                // Check for deletion markers
-                if (valueSize == 1 && currentChar == DELETED)
-                {
-                    DeleteIndex(map, key);
-                }
-
-                keyMode = true;
-                keyStart = ftell(file);
-            }
-
-            if (keyMode)
-            {
-                ++keySize;
+                FileIndexSet(db.map, key, index);
             }
             else
             {
-                ++valueSize;
-            }
-
-            escapeMode = keyMode && !escapeMode && currentChar == ESCAPE;
-
-            if (keyMode && currentChar == '\0')
-            {
-                nullTerminatingKey = true;
-            }
-            else if (keyMode)
-            {
-                nullTerminatingKey = false;
+                FileIndexDelete(db.map, key);
             }
         }
-
-    } while (readBytes == chunkSize);
-
-    // Handle incomplete value
-    if (!keyMode && valueSize)
-    {
-        if (fseek(file, keyStart, SEEK_SET))
+        else
         {
-            fclose(file);
-            return NULL;
+            fseek(file, currentKeyValuePos, SEEK_SET);
+            _seekIndicator(file);
         }
 
-        // TODO filter key for escaped value
-        char *key = malloc(sizeof(char) * (nullTerminatingKey
-                                               ? keySize
-                                               : keySize + 1));
-
-        if (keySize != fread(key, sizeof(char), keySize, file))
-        {
-            free(key);
-            fclose(file);
-            return NULL;
-        }
-
-        if (!nullTerminatingKey)
-        {
-            key[keySize] = '\0';
-        }
-
-        FileIndex index = {valueStart, valueSize};
-        SetIndex(map, key, index);
+        free(key);
+        free(keyValueData);
+        currentKeyValuePos = ftell(file);
     }
 
-    size_t handleSize = strlen(handle);
-    char *handleCpy = malloc(sizeof(char) * handleSize);
-    memcpy(handleCpy, handle, handleSize);
-
-    DB *db = malloc(sizeof(DB));
-    db->handle = handleCpy;
-    db->map = map;
-    db->file = file;
+    if (ferror(file))
+    {
+        db.error |= DB_FILE_ERROR;
+    }
 
     return db;
 }
 
-Buffer *GetDB(DB db, char *key)
+Buffer DBGet(DB db, char *key)
 {
-    FileIndex index = GetIndex(db.map, key);
+    Buffer buff;
+
+    FileIndex index = FileIndexGet(db.map, key);
 
     FILE *file = freopen(db.handle, "r", db.file);
 
     if (!file)
     {
-        return NULL;
+        db.error = DB_FILE_ERROR;
+        return buff;
     }
 
     fsetpos(file, index.start);
@@ -222,50 +213,68 @@ Buffer *GetDB(DB db, char *key)
     char *data = malloc(sizeof(char) * index.len);
     if (fread(data, sizeof(char), index.len, file) != 1)
     {
-        return NULL;
+        db.error = DB_FILE_ERROR;
+        return buff;
     }
 
-    Buffer *buff = malloc(sizeof(Buffer));
-    buff->data = data;
-    buff->len = index.len;
+    buff.data = data;
+    buff.len = index.len;
 
     return buff;
 }
 
-int SetDB(DB db, char *key, Buffer value)
+// TODO error codes
+int DBSet(DB db, char *key, Buffer value)
 {
     FILE *file = freopen(db.handle, "a", db.file);
 
     if (!file)
     {
+        db.error = DB_FILE_ERROR;
         return -1;
     }
 
-    if (fputs(key, file) != EOF)
+    const size_t uncheckedKeySize = strlen(key) + sizeof(char);
+    if (uncheckedKeySize > MAX_KEY_SIZE)
     {
-        return NULL;
+        return -1;
     }
 
-    if (fputc(KEY_SEP, file) != EOF)
-    {
-        return NULL;
-    }
+    const __keysize_t keySize = uncheckedKeySize;
 
-    const size_t dataStart = ftell(file);
+    const size_t payloadSize = PREFIX_SIZE + keySize + value.len +
+                               sizeof(__hash_t);
 
-    if (fwrite(value.data, sizeof(char), value.len, file) != value.len)
-    {
-        return NULL;
-    }
+    char *payload = malloc(sizeof(char) * payloadSize);
 
-    if (fputc(VALUE_SEP, file) != EOF)
-    {
-        return NULL;
-    }
+    size_t bytesCopied = 0;
+    memcpy(payload + bytesCopied, &INDICATOR, sizeof(__indicator_t));
+    bytesCopied += sizeof(__indicator_t);
 
-    FileIndex index = {
-        dataStart,
-        value.len};
+    memcpy(payload + bytesCopied, &keySize, sizeof(__keysize_t));
+    bytesCopied += sizeof(__keysize_t);
 
-    SetIndex(db.map, key, index);
+    memcpy(payload + bytesCopied, &(value.len), sizeof(size_t));
+    bytesCopied += sizeof(size_t);
+
+    memcpy(payload + bytesCopied, key, keySize);
+    bytesCopied += keySize;
+
+    const size_t dataStart = ftell(file) + bytesCopied;
+    memcpy(payload + bytesCopied, value.data, value.len);
+    bytesCopied += value.len;
+
+    // Just hash key and value
+    const __uint32_t hash = Hash(payload + PREFIX_SIZE, bytesCopied - PREFIX_SIZE);
+    memcpy(payload + bytesCopied, &hash, sizeof(__hash_t));
+
+    fwrite(payload, sizeof(char), payloadSize, file);
+
+    free(payload);
+
+    FileIndex index = {dataStart, value.len};
+
+    FileIndexSet(db.map, key, index);
+
+    return 0;
 }
