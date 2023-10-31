@@ -13,6 +13,8 @@ const ValueMetadata = struct {
 
 const KeyToValueMetadataMap = std.StringHashMap(ValueMetadata);
 
+const RefCounted = @import("refcounted.zig").RefCounted;
+
 // Use this to either read and process the value in-place or copy it elsewhere.
 // Up to you.
 //
@@ -46,14 +48,8 @@ const ValueProxy = struct {
 
         var file = &self.store.segment_files.items[self.segment_file_index];
 
-        const pos = try file.getPos();
+        const count = try file.preadAll(out_buf, self.offset);
 
-        // Automatically resets the file cursor regardless of whether an error occurred
-        defer file.seekTo(pos) catch {};
-
-        try file.seekTo(self.offset);
-
-        const count = try file.readAll(out_buf);
         std.debug.assert(count == out_buf.len);
 
         return out_buf;
@@ -140,11 +136,96 @@ fn timeInMillis() !u64 {
     return tv.tv_sec * 1000 + tv.tv_usec / 1000;
 }
 
+// A File + non-atomic reference count.
+// The reference count should only be modified within critical sections.
+//
+// Consider a scenario like the following:
+//
+// 1. Somebody calls `setAllocKey` on the store, which references the last segment file (i.e. the active one).
+// 2. Context switch happens afterwards (when the segment_files/metadata lock is released) and then somebody else
+// appends to the file (A), resulting in it hitting max_segment_size, at which point we insert another file (B) and now
+// B is the last element in the segments array.
+// 3. Another context switch, and now we're compacting. The compaction finishes and technically none of the files except
+// the last one (B) and our newly compacted file contain required data; except, of course, the file that was referenced
+// in step 1.
+//
+// Maintaining a reference count allows us to handle an arbitrarily long chain of threads which are holding onto
+// a segment file that is no longer active.
+//
+// The secondary issue that arises is that we have our `ValueProxy` struct which holds onto these files as well. This
+// means that we'll need to get a mutable lock before we can increment the refcount. Unless the refcount is atomic :)
+//
+// So yes, we'll use an atomic refcount on the file.
+const SegmentFile = struct {
+    allocator: Allocator,
+
+    count: std.atomic.Atomic(usize) = std.atomic.Atomic(usize).init(1),
+
+    dir: *std.fs.Dir,
+    sub_path: [1024]u8,
+
+    delete_on_close: bool = false,
+
+    file: File,
+
+    // We should have either shared or exclusive ownership over
+    // the file
+    lock: std.Thread.RwLock,
+
+    // SegmentFiles are heap-allocated because we want them to close/free themselves
+    // once they are no longer referenced.
+    fn init(allocator: Allocator, dir: *std.fs.Dir, sub_path: []const u8, file: File) !*SegmentFile {
+        _ = file;
+        _ = dir;
+        var self = try allocator.create(SegmentFile);
+
+        @memcpy(self.path, sub_path);
+
+        return self;
+    }
+
+    fn open(dir: *std.fs.Dir, sub_path: []const u8, open_flags: File.OpenFlags) !SegmentFile {
+        return SegmentFile.init(dir, sub_path, try dir.openFile(sub_path, open_flags));
+    }
+
+    fn create(dir: *std.fs.Dir, sub_path: []const u8, create_flags: File.CreateFlags) !SegmentFile {
+        return SegmentFile.init(dir, sub_path, try dir.createFile(sub_path, create_flags));
+    }
+
+    fn refAssumeLocked(self: *SegmentFile) *File {
+        _ = self.count.fetchAdd(1, .Monotonic);
+
+        return &self.file;
+    }
+
+    // Assumes you have an exclusive lock on the segment file.
+    fn unrefUnlock(self: *SegmentFile) void {
+        // The value _was_ 1 (fetchSub returns the old value) hence the if (true)
+        if (self.count.fetchSub(1, .Release)) {
+            self.count.fence(.Acquire);
+
+            self.file.close();
+            self.lock.unlock();
+
+            // We call free outside of the lock since we
+            self.allocator.free(self);
+
+            return;
+        }
+
+        self.lock.unlock();
+    }
+};
+
 const Store = struct {
     allocator: Allocator,
     dir_path: []const u8,
-    segment_files: std.ArrayList(File),
     max_segment_size: u64,
+
+    segment_files: std.ArrayList(SegmentFile),
+
+    // TODO(Apaar): Make a "Locked" struct or something
+    key_to_value_metadata_lock: std.Thread.RwLock,
     key_to_value_metadata: KeyToValueMetadataMap,
 
     const Self = @This();
@@ -162,7 +243,7 @@ const Store = struct {
         var self = Self{
             .allocator = allocator,
             .dir_path = dir_path_copy,
-            .segment_files = std.ArrayList(File).init(allocator),
+            .segment_files = std.ArrayList(SegmentFile).init(allocator),
             .key_to_value_metadata = KeyToValueMetadataMap.init(allocator),
             .max_segment_size = max_segment_size,
         };
@@ -175,10 +256,12 @@ const Store = struct {
         while (try dir_iter.next()) |entry| {
             std.debug.assert(entry.kind == .file);
 
-            try self.segment_files.append(
+            try self.segment_files.append(try SegmentFile.open(
+                &dir.dir,
+                entry.name,
                 // TODO(Apaar): Open every file as read only and then re-open as read-write below
-                try dir.dir.openFile(entry.name, .{ .mode = .read_write }),
-            );
+                .{ .mode = .read_write },
+            ));
         }
 
         // Find the smallest segment file that's below the threshold and then work on that; if none is found,
@@ -190,7 +273,7 @@ const Store = struct {
         var smallest_segment_file_index: i32 = -1;
 
         for (self.segment_files.items, 0..) |segment_file, i| {
-            const size = try segment_file.getEndPos();
+            const size = try segment_file.file.getEndPos();
 
             if (size < min_size) {
                 smallest_segment_file_index = @intCast(i);
@@ -200,10 +283,14 @@ const Store = struct {
         if (smallest_segment_file_index < 0) {
             const path = randPath();
 
-            var file = try dir.dir.createFile(&path, .{ .read = true });
-            errdefer file.close();
+            var file = try SegmentFile.create(&dir.dir, &path, .{ .read = true });
 
-            try self.segment_files.append(file);
+            errdefer {
+                file.delete_on_close = true;
+                file.closeAssumeLocked();
+            }
+
+            try self.segment_files.append(SegmentFile.init(file));
         } else if (smallest_segment_file_index != self.segment_files.items.len - 1) {
             // Swap the smallest file to the end of the array
             std.mem.swap(
@@ -219,23 +306,23 @@ const Store = struct {
         // Go through every segment op in every segment file and fill up our
         // key value metadata.
         for (self.segment_files.items, 0..) |*segment_file, segment_file_index| {
-            while (try readSegmentOpHeader(segment_file)) |header| {
+            while (try readSegmentOpHeader(segment_file.file)) |header| {
                 switch (header) {
                     .set => |op| {
                         // Read in the key
                         try temp_key_buf.resize(op.key_len);
 
-                        _ = try segment_file.readAll(temp_key_buf.items);
+                        _ = try segment_file.file.readAll(temp_key_buf.items);
 
                         const value_metadata = ValueMetadata{
                             // We should be at the value now since we read in the key above
-                            .offset = try segment_file.getPos(),
+                            .offset = try segment_file.file.getPos(),
                             .len = op.value_len,
                             .segment_files_index = @intCast(segment_file_index),
                         };
 
                         // Skip over the value
-                        _ = try segment_file.seekBy(@intCast(op.value_len));
+                        _ = try segment_file.file.seekBy(@intCast(op.value_len));
 
                         const entry = try self.key_to_value_metadata.getOrPutAdapted(
                             @as([]const u8, temp_key_buf.items),
@@ -257,7 +344,7 @@ const Store = struct {
                         // Read in the key
                         try temp_key_buf.resize(op.key_len);
 
-                        _ = try segment_file.readAll(temp_key_buf.items);
+                        _ = try segment_file.file.readAll(temp_key_buf.items);
 
                         const removed = self.key_to_value_metadata.fetchRemove(temp_key_buf.items);
 
@@ -274,16 +361,24 @@ const Store = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        var entry_iter = self.key_to_value_metadata.iterator();
+        {
+            self.key_to_value_metadata_lock.lock();
+            defer self.key_to_value_metadata_lock.unlock();
 
-        while (entry_iter.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
+            var entry_iter = self.key_to_value_metadata.iterator();
+
+            while (entry_iter.next()) |entry| {
+                self.allocator.free(entry.key_ptr.*);
+            }
+
+            self.key_to_value_metadata.deinit();
         }
 
-        self.key_to_value_metadata.deinit();
-
         for (self.segment_files.items) |*segment_file| {
-            segment_file.close();
+            segment_file.lock.lock();
+            defer segment_file.lock.unlock();
+
+            segment_file.closeAssumeLocked();
         }
 
         self.segment_files.deinit();
@@ -291,8 +386,29 @@ const Store = struct {
         self.allocator.free(self.dir_path);
     }
 
+    // KATYA:
+    // Maybe ValueProxy goes stale (underlying file is deleted/compacted), then
+    // you can just retry (we indicate that it's stale).
+    //
+    // Technically we don't even have to guarantee that a ValueProxy for a given `get`
+    // produces the value _at the time that the get happened_. We can even produce values
+    // from the future (if that's fine).
+    //
+    // We may want to store a timestamp of when the key was written so we can e.g. provide
+    // guarantees that no key/values more recent than e.g. x minutes will ever go stale.
     pub fn get(self: *Self, key: []const u8) ?ValueProxy {
+        // FIXME(Apaar): Deadlock potential here
+        self.key_to_value_metadata_lock.lockShared();
+        defer self.key_to_value_metadata_lock.unlockShared();
+
         const value_metadata = self.key_to_value_metadata.get(key) orelse return null;
+
+        var file = &self.segment_files.items[value_metadata.segment_files_index];
+
+        file.lock.lockShared();
+        defer file.lock.unlockShared();
+
+        file.refAssumeLocked();
 
         return .{
             .store = self,
@@ -303,8 +419,6 @@ const Store = struct {
     }
 
     pub fn setAllocKey(self: *Self, key: []const u8, value: []const u8) !void {
-        var file = self.segment_files.items[self.segment_files.items.len - 1];
-
         const op_type_buf = [_]u8{@intFromEnum(SegmentOpType.set)};
         const key_len_buf: [8]u8 = @bitCast(key.len);
         const value_len_buf: [8]u8 = @bitCast(value.len);
@@ -332,6 +446,26 @@ const Store = struct {
             },
         };
 
+        // This is the active segment file
+        const segment_file_index = self.segment_files.items.len - 1;
+
+        var file = blk: {
+            self.lock.lock();
+            defer self.lock.unlock();
+
+            var file = self.segment_files.items[segment_file_index];
+
+            break :blk file;
+        };
+
+        // FIXME(Apaar): Actually, we could have two threads which both write to a file
+        // just as it's about to go over the max_segment_size, and one of them will push it over,
+        // at which point this is no longer technically the segment file.
+        //
+        // Thankfully, we store the index in a local variable above, but what if things get compacted
+        // in that time? Then maybe the file will no longer even exist?? That would be wacko.
+        //
+        // Maybe we should avoid the whole locking thing and just use atomic refcounts.
         const pos = try file.getPos();
 
         try file.writevAll(&iovecs);
@@ -339,19 +473,24 @@ const Store = struct {
         const value_metadata = ValueMetadata{
             .offset = pos + op_type_buf.len + key_len_buf.len + value_len_buf.len + key.len,
             .len = value.len,
-            .segment_files_index = @intCast(self.segment_files.items.len - 1),
+            .segment_files_index = @intCast(segment_file_index),
         };
 
-        const entry = try self.key_to_value_metadata.getOrPutAdapted(key, self.key_to_value_metadata.ctx);
+        {
+            self.lock.lock();
+            defer self.lock.unlock();
 
-        if (!entry.found_existing) {
-            var key_copy = try self.allocator.alloc(u8, key.len);
-            @memcpy(key_copy, key);
+            const entry = try self.key_to_value_metadata.getOrPutAdapted(key, self.key_to_value_metadata.ctx);
 
-            entry.key_ptr.* = key_copy;
+            if (!entry.found_existing) {
+                var key_copy = try self.allocator.alloc(u8, key.len);
+                @memcpy(key_copy, key);
+
+                entry.key_ptr.* = key_copy;
+            }
+
+            entry.value_ptr.* = value_metadata;
         }
-
-        entry.value_ptr.* = value_metadata;
 
         if (value_metadata.offset + value.len > self.max_segment_size) {
             // Append a new segment file because this last one is too big
@@ -363,19 +502,25 @@ const Store = struct {
             var new_file = try dir.createFile(&path, .{ .read = true });
             errdefer new_file.close();
 
+            self.lock.lock();
+            defer self.lock.unlock();
+
             try self.segment_files.append(new_file);
         }
     }
 
     pub fn del(self: *Self, key: []const u8) !bool {
-        // We do not record a delete operation if the key does not exist because that means a delete
-        // operation was already recorded prior.
-        const removed = self.key_to_value_metadata.fetchRemove(key) orelse return false;
+        {
+            // We do not record a delete operation if the key does not exist because that means a delete
+            // operation was already recorded prior.
+            const removed = self.key_to_value_metadata.fetchRemove(key) orelse return false;
 
-        // TODO(Apaar): Do not assume we always own the keys
-        self.allocator.free(removed.key);
+            // TODO(Apaar): Do not assume we always own the keys
+            self.allocator.free(removed.key);
 
-        var file = self.segment_files.items[self.segment_files.items.len - 1];
+            var file = self.segment_files.items[self.segment_files.items.len - 1];
+            _ = file;
+        }
 
         const op_type_buf = [_]u8{@intFromEnum(SegmentOpType.del)};
         const key_len_buf: [8]u8 = @bitCast(key.len);
@@ -394,8 +539,9 @@ const Store = struct {
                 .iov_len = key.len,
             },
         };
+        _ = iovecs;
 
-        try file.writevAll(&iovecs);
+        // try file.writevAll(&iovecs);
 
         return true;
     }
@@ -435,84 +581,189 @@ const Store = struct {
         var dir = try std.fs.cwd().makeOpenPathIterable(self.dir_path, .{});
         defer dir.close();
 
-        var dir_iter = dir.iterate();
-
         // Append all the compacted stuff into a single file as much as possible, no need to care about
         // max_segment_size for an "inactive" segment.
-        const compact_file_path = randPath();
+        const compacted_file_path = randPath();
 
-        var compacted_file = try dir.dir.openFile(&compact_file_path, .{
+        var compacted_file = try dir.dir.openFile(&compacted_file_path, .{
             .mode = .write_only,
         });
-        _ = compacted_file;
+        errdefer {
+            // TODO(Apaar): Delete the compacted file
+        }
 
         var temp_key_buf = std.ArrayList(u8).init(self.allocator);
         defer temp_key_buf.deinit();
 
-        while (try dir_iter.next()) |entry| {
+        // We're gonna store the ranges of every set operation we care about and what file
+        // they originated from so we can compact as many of them as possible into a single file.
+        var compactable_files = std.ArrayList(File).init(self.allocator);
+        defer {
+            for (compactable_files.items) |file| {
+                file.close();
+            }
+
+            compactable_files.deinit();
+        }
+
+        const SetOpRange = struct {
+            compactable_file_index: u16,
+            pos: u64,
+            size: u64,
+
+            // Used for reconstructing a new key_to_value_metadata map.
+            value_offset_relative_to_pos: u64,
+        };
+
+        var key_to_set_op_range = std.StringHashMap(SetOpRange).init(self.allocator);
+        defer {
+            var key_iter = key_to_set_op_range.keyIterator();
+            while (key_iter.next()) |key| {
+                self.allocator.free(key);
+            }
+
+            key_to_set_op_range.deinit();
+        }
+
+        var dir_iter = dir.iterate();
+
+        while (try dir_iter.next()) |dir_entry| {
             const cur_time = timeInMillis();
 
             if (cur_time - start_time >= ms) {
-                break;
+                // TODO(Apaar): Should probably warn the caller that we had insufficient time to even get to the
+                // compaction stage.
+                //
+                // Alternatively, the caller should be able to provide a struct with how long each phase of the
+                // compaction should have (gathering the ops, writing to the compacted file). If they have an
+                // overwrite/delete-heavy workload, the gathering would take longer than the compaction.
+                return;
             }
 
             // TODO(Apaar): Do not assume the nested files are always regular files
-            std.debug.assert(entry.kind == .file);
+            std.debug.assert(dir_entry.kind == .file);
 
-            var file = try dir.dir.openFile(entry.name, File.OpenFlags{ .mode = .read_only });
+            // Skip our compacted_file
+            if (std.mem.eql(u8, dir_entry.name, compacted_file_path)) {
+                continue;
+            }
 
-            var key_to_value_metadata = KeyToValueMetadataMap.init(self.allocator);
-            _ = key_to_value_metadata;
+            var file = try dir.dir.openFile(dir_entry.name, File.OpenFlags{ .mode = .read_only });
 
+            if (try file.getEndPos() < self.max_segment_size) {
+                // This is probably the active file, skip it
+                file.close();
+                continue;
+            }
+
+            const compactable_file_index = compactable_files.items.len;
+            compactable_files.append(file);
+
+            // TODO(Apaar): Traverse the files in "last modified time" descending so that
+            // we see the most recent writes first, and then skip duplicate writes (e.g. a key
+            // that already exists, don't bother copying it to the compacted file).
+
+            // HACK(Apaar): Mostly copypasta from `init`
             while (try readSegmentOpHeader(&file)) |header| {
                 switch (header) {
                     .set => |op| {
+                        // op type + key len + value len
+                        const header_size = 1 + 8 + 8;
+
+                        // Start of the entire set operation
+                        const op_start_pos = try file.getPos() - header_size;
+
                         // Read in the key
                         try temp_key_buf.resize(op.key_len);
 
                         _ = try file.readAll(temp_key_buf.items);
 
-                        const value_metadata = ValueMetadata{
-                            // We should be at the value now since we read in the key above
-                            .offset = try segment_file.getPos(),
-                            .len = op.value_len,
-                            .segment_files_index = 0,
+                        const set_op_range = SetOpRange{
+                            .compactable_file_index = compactable_file_index,
+                            .pos = op_start_pos,
+                            .size = header_size + op.key_len + op.value_len,
+                            .value_offset_relative_to_pos = header_size + op.key_len,
                         };
 
                         // Skip over the value
-                        _ = try segment_file.seekBy(@intCast(op.value_len));
+                        _ = try file.seekBy(@intCast(op.value_len));
 
-                        const entry = try self.key_to_value_metadata.getOrPutAdapted(
+                        const entry = try key_to_set_op_range.getOrPutAdapted(
                             @as([]const u8, temp_key_buf.items),
-                            self.key_to_value_metadata.ctx,
+                            key_to_set_op_range.ctx,
                         );
 
                         if (!entry.found_existing) {
                             // Copy it into our own non-temp buffer under our allocator
-                            const key_buf = try allocator.alloc(u8, op.key_len);
+                            const key_buf = try self.allocator.alloc(u8, op.key_len);
                             @memcpy(key_buf, temp_key_buf.items);
 
                             entry.key_ptr.* = key_buf;
                         }
 
-                        entry.value_ptr.* = value_metadata;
+                        entry.value_ptr.* = set_op_range;
                     },
 
                     .del => |op| {
+                        // FIXME(Apaar): What happens if there was a set operation that occurred
+                        // after a previous del operation that we encountered? Should we order our
+                        // traversal here by file mtime? That should ensure we have more recent ops
+                        // afterwards.
+
                         // Read in the key
                         try temp_key_buf.resize(op.key_len);
 
-                        _ = try segment_file.readAll(temp_key_buf.items);
+                        _ = try file.readAll(temp_key_buf.items);
 
-                        const removed = self.key_to_value_metadata.fetchRemove(temp_key_buf.items);
+                        const removed = key_to_set_op_range.fetchRemove(temp_key_buf.items);
 
                         if (removed) |entry| {
-                            // TODO(Apaar): Do not assume we always own the keys
                             self.allocator.free(entry.key);
                         }
                     },
-                } 
+                }
             }
+        }
+
+        // Now that we have the key and the latest ranges, we can copy them to the compacted file using
+        // the copy range syscall.
+        //
+        // Note that we may not be able to finish copying everything in the time allotted.
+        var key_to_set_op_range_iter = key_to_set_op_range.iterator();
+
+        while (key_to_set_op_range_iter.next()) |entry| {
+            const range = entry.value_ptr.*;
+
+            var src_file = compactable_files.items[
+                range.compactable_file_index
+            ];
+
+            try src_file.copyRangeAll(range.pos, compacted_file, try compacted_file.getEndPos(), range.size);
+        }
+
+        // Restart the iterator
+        key_to_set_op_range_iter = key_to_set_op_range.iterator();
+
+        while (key_to_set_op_range_iter.next()) |entry| {
+            const range = entry.value_ptr.*;
+
+            self.lock.lock();
+            defer self.lock.unlock();
+
+            // If there is no entry that means this key was deleted in the active file, just skip
+            // adding it to the map.
+            //
+            // Yes, it's been written to the compacted file. No, I do not care. We want to avoid
+            // locking in the scanning loop we do above so I'm fine with the overhead of the additional
+            // unnecessary range (for now, until I benchmark, depends on workload? Can't think of
+            // many delete-heavy workloads).
+            var prev_entry = self.key_to_value_metadata.getEntry(entry.key_ptr) orelse continue;
+
+            prev_entry.value_ptr.* = ValueMetadata{
+                .offset = range.pos + range.value_offset_relative_to_pos,
+                .len = range.size - range.value_offset_relative_to_pos,
+                .segment_files_index = 0,
+            };
         }
     }
 };
