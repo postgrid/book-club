@@ -5,6 +5,18 @@ usually sufficient but you can also have a folder for each.
 
 ## Schedule
 
+### Week 7 (Oct 31 - Nov 2)
+
+Read up until the end of Chapter 4.
+
+1. Create a gRPC server/client that uses your key-value store as a library.
+
+Should support the `set`, `get`, and `delete` operations over the network. Make
+sure to document your proto files.
+
+2. Write a gRPC client for your key-value store in a different langauge than
+the server.
+
 ### Week 6 (Oct 24 - Oct 31)
 
 Catch up on previous weeks exercises and readings.
