@@ -5,7 +5,13 @@ usually sufficient but you can also have a folder for each.
 
 ## Schedule
 
-### Week 7 (Oct 31 - Nov 2)
+### Week 8 (Nov 7 - Nov 14)
+
+Read up until "Problems with Replication Lag".
+
+Continue on the exercise from last week.
+
+### Week 7 (Oct 31 - Nov 7)
 
 Read up until the end of Chapter 4.
 
@@ -14,7 +20,7 @@ Read up until the end of Chapter 4.
 Should support the `set`, `get`, and `delete` operations over the network. Make
 sure to document your proto files.
 
-2. Write a gRPC client for your key-value store in a different langauge than
+2. Write a gRPC client for your key-value store in a different language than
 the server.
 
 ### Week 6 (Oct 24 - Oct 31)
