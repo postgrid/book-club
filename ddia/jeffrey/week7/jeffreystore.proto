@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package jeffreystore;
+
+service Store {
+    rpc Open(OpenRequest) returns(OpenResponse) {}
+    rpc GetKey(GetRequest) returns(GetResponse) {}
+    rpc SetKey(SetRequest) returns(SetResponse) {}
+    rpc DeleteKey(DeleteRequest) returns(DeleteResponse) {}
+    rpc Compact(CompactRequest) returns(CompactResponse) {}
+}
+
+message OpenRequest {
+    string filename = 1;
+}
+
+message OpenResponse {
+    string status = 1;
+}
+
+message GetRequest {
+    string filename = 1;
+    string key = 2;
+}
+
+message GetResponse {
+    string status = 1;
+    string value = 2;
+}
+
+message SetRequest {
+    string filename = 1;
+    string key = 2;
+    string value = 3;
+}
+
+message SetResponse {
+    string status = 1;
+}
+
+message DeleteRequest {
+    string filename = 1;
+    string key = 2;
+}
+
+message DeleteResponse {
+    string status = 1;
+}
+
+message CompactRequest {
+    string filename = 1;
+}
+
+message CompactResponse {
+    string status = 1;
+}
