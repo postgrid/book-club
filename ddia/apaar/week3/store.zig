@@ -175,9 +175,13 @@ const SegmentFile = struct {
     // SegmentFiles are heap-allocated because we want them to close/free themselves
     // once they are no longer referenced.
     fn init(allocator: Allocator, dir: *std.fs.Dir, sub_path: []const u8, file: File) !*SegmentFile {
-        _ = file;
-        _ = dir;
         var self = try allocator.create(SegmentFile);
+
+        self.* = SegmentFile{
+            .allocator = allocator,
+            .dir = dir,
+            .file = file,
+        };
 
         @memcpy(self.path, sub_path);
 
@@ -199,6 +203,7 @@ const SegmentFile = struct {
     }
 
     // Assumes you have an exclusive lock on the segment file.
+    // Also unlocks that lock because duh, it could be freed after you unref it.
     fn unrefUnlock(self: *SegmentFile) void {
         // The value _was_ 1 (fetchSub returns the old value) hence the if (true)
         if (self.count.fetchSub(1, .Release)) {
