@@ -5,15 +5,15 @@ const Allocator = std.mem.Allocator;
 const Gpa = std.heap.GeneralPurposeAllocator(.{});
 
 const ValueMetadata = struct {
-    // TODO(Apaar): Rename to segment_file_index
-    segment_files_index: u16,
+    // TODO(Apaar): This makes this struct very heavy on memory! Could replace with a file ID
+    // and while we're at it we could also replace the offset and len since the max segment size
+    // is limited.
+    file: *SegmentFile,
     offset: u64,
     len: u64,
 };
 
 const KeyToValueMetadataMap = std.StringHashMap(ValueMetadata);
-
-const RefCounted = @import("refcounted.zig").RefCounted;
 
 // Use this to either read and process the value in-place or copy it elsewhere.
 // Up to you.
@@ -36,19 +36,22 @@ const RefCounted = @import("refcounted.zig").RefCounted;
 // returns. So we'll have only as many references to the original segment file as there were ValueProxies
 // that called `get` in parallel; a number which is limited in practice by the number of cores on the machine.
 const ValueProxy = struct {
-    store: *Store,
-    segment_file_index: u16,
+    segment_file: *SegmentFile,
     offset: u64,
     len: u64,
 
     const Self = @This();
 
+    pub fn deinit(self: *ValueProxy) void {
+        // See the comment above `SegmentFile::unref` to see why it's kinda okay that we're doing this
+        // for every read (not fantastic but better than an exclusive lock).
+        self.segment_file.unref();
+    }
+
     pub fn readInto(self: *const Self, out_buf: []u8) ![]u8 {
         std.debug.assert(out_buf.len == self.len);
 
-        var file = &self.store.segment_files.items[self.segment_file_index];
-
-        const count = try file.preadAll(out_buf, self.offset);
+        const count = try self.segment_file.file.preadAll(out_buf, self.offset);
 
         std.debug.assert(count == out_buf.len);
 
@@ -162,7 +165,7 @@ const SegmentFile = struct {
     count: std.atomic.Atomic(usize) = std.atomic.Atomic(usize).init(1),
 
     dir: *std.fs.Dir,
-    sub_path: [1024]u8,
+    sub_path: []u8,
 
     delete_on_close: bool = false,
 
@@ -179,46 +182,68 @@ const SegmentFile = struct {
 
         self.* = SegmentFile{
             .allocator = allocator,
+            .sub_path = try allocator.alloc(u8, sub_path.len),
+            .lock = .{},
             .dir = dir,
             .file = file,
         };
 
-        @memcpy(self.path, sub_path);
+        @memcpy(self.sub_path, sub_path);
 
         return self;
     }
 
-    fn open(dir: *std.fs.Dir, sub_path: []const u8, open_flags: File.OpenFlags) !SegmentFile {
-        return SegmentFile.init(dir, sub_path, try dir.openFile(sub_path, open_flags));
+    fn open(allocator: Allocator, dir: *std.fs.Dir, sub_path: []const u8, open_flags: File.OpenFlags) !*SegmentFile {
+        return SegmentFile.init(allocator, dir, sub_path, try dir.openFile(sub_path, open_flags));
     }
 
-    fn create(dir: *std.fs.Dir, sub_path: []const u8, create_flags: File.CreateFlags) !SegmentFile {
-        return SegmentFile.init(dir, sub_path, try dir.createFile(sub_path, create_flags));
+    fn create(allocator: Allocator, dir: *std.fs.Dir, sub_path: []const u8, create_flags: File.CreateFlags) !*SegmentFile {
+        return SegmentFile.init(allocator, dir, sub_path, try dir.createFile(sub_path, create_flags));
     }
 
-    fn refAssumeLocked(self: *SegmentFile) *File {
+    fn refAssumeLocked(self: *SegmentFile) void {
         _ = self.count.fetchAdd(1, .Monotonic);
-
-        return &self.file;
     }
 
-    // Assumes you have an exclusive lock on the segment file.
-    // Also unlocks that lock because duh, it could be freed after you unref it.
-    fn unrefUnlock(self: *SegmentFile) void {
+    // Assumes you do not have a lock on the file. Then, in the common case where
+    // the refcount is still greater than zero, it just holds a shared lock.
+    //
+    // Once the refcount does hit zero, though, it grabs a writer lock; the nice thing
+    // is that it's already uncontended in that case anyways (there aren't any readers
+    // on another thread since the refcount hit zero), so it shouldn't slow anybody
+    // down.
+    fn unref(self: *SegmentFile) void {
+        self.lock.lockShared();
+
         // The value _was_ 1 (fetchSub returns the old value) hence the if (true)
-        if (self.count.fetchSub(1, .Release)) {
+        if (self.count.fetchSub(1, .Release) == 1) {
+            // Ensure that the decrement is visible to other cores prior to running the code hereafter
             self.count.fence(.Acquire);
 
+            self.lock.unlockShared();
+
+            // TODO(Apaar): Do we even need the exclusive lock here? No other thread should have a reference
+            // to this file at this point?
+
+            self.lock.lock();
+
             self.file.close();
+
+            if (self.delete_on_close) {
+                self.dir.deleteFile(self.sub_path) catch {};
+            }
+
+            self.allocator.free(self.sub_path);
+
             self.lock.unlock();
 
-            // We call free outside of the lock since we
-            self.allocator.free(self);
+            // We call free outside of the lock since there's no race for the allocator.
+            self.allocator.destroy(self);
 
             return;
         }
 
-        self.lock.unlock();
+        self.lock.unlockShared();
     }
 };
 
@@ -227,10 +252,10 @@ const Store = struct {
     dir_path: []const u8,
     max_segment_size: u64,
 
-    segment_files: std.ArrayList(SegmentFile),
-
     // TODO(Apaar): Make a "Locked" struct or something
-    key_to_value_metadata_lock: std.Thread.RwLock,
+    lock: std.Thread.RwLock,
+
+    segment_files: std.ArrayList(*SegmentFile),
     key_to_value_metadata: KeyToValueMetadataMap,
 
     const Self = @This();
@@ -248,7 +273,8 @@ const Store = struct {
         var self = Self{
             .allocator = allocator,
             .dir_path = dir_path_copy,
-            .segment_files = std.ArrayList(SegmentFile).init(allocator),
+            .lock = .{},
+            .segment_files = std.ArrayList(*SegmentFile).init(allocator),
             .key_to_value_metadata = KeyToValueMetadataMap.init(allocator),
             .max_segment_size = max_segment_size,
         };
@@ -262,6 +288,7 @@ const Store = struct {
             std.debug.assert(entry.kind == .file);
 
             try self.segment_files.append(try SegmentFile.open(
+                allocator,
                 &dir.dir,
                 entry.name,
                 // TODO(Apaar): Open every file as read only and then re-open as read-write below
@@ -288,18 +315,18 @@ const Store = struct {
         if (smallest_segment_file_index < 0) {
             const path = randPath();
 
-            var file = try SegmentFile.create(&dir.dir, &path, .{ .read = true });
+            var file = try SegmentFile.create(allocator, &dir.dir, &path, .{ .read = true });
 
             errdefer {
                 file.delete_on_close = true;
-                file.closeAssumeLocked();
+                file.unref();
             }
 
-            try self.segment_files.append(SegmentFile.init(file));
+            try self.segment_files.append(file);
         } else if (smallest_segment_file_index != self.segment_files.items.len - 1) {
             // Swap the smallest file to the end of the array
             std.mem.swap(
-                File,
+                *SegmentFile,
                 &self.segment_files.items[@intCast(smallest_segment_file_index)],
                 &self.segment_files.items[self.segment_files.items.len - 1],
             );
@@ -310,8 +337,8 @@ const Store = struct {
 
         // Go through every segment op in every segment file and fill up our
         // key value metadata.
-        for (self.segment_files.items, 0..) |*segment_file, segment_file_index| {
-            while (try readSegmentOpHeader(segment_file.file)) |header| {
+        for (self.segment_files.items) |segment_file| {
+            while (try readSegmentOpHeader(&segment_file.file)) |header| {
                 switch (header) {
                     .set => |op| {
                         // Read in the key
@@ -321,9 +348,9 @@ const Store = struct {
 
                         const value_metadata = ValueMetadata{
                             // We should be at the value now since we read in the key above
+                            .file = segment_file,
                             .offset = try segment_file.file.getPos(),
                             .len = op.value_len,
-                            .segment_files_index = @intCast(segment_file_index),
                         };
 
                         // Skip over the value
@@ -366,24 +393,23 @@ const Store = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        {
-            self.key_to_value_metadata_lock.lock();
-            defer self.key_to_value_metadata_lock.unlock();
+        // TODO(Apaar): What happens if multiple threads call deinit?
+        // I guess there's no race but calling deinit twice is just bad, so
+        // I'll leave this as-is.
 
-            var entry_iter = self.key_to_value_metadata.iterator();
+        self.lock.lock();
+        defer self.lock.unlock();
 
-            while (entry_iter.next()) |entry| {
-                self.allocator.free(entry.key_ptr.*);
-            }
+        var entry_iter = self.key_to_value_metadata.iterator();
 
-            self.key_to_value_metadata.deinit();
+        while (entry_iter.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
         }
 
-        for (self.segment_files.items) |*segment_file| {
-            segment_file.lock.lock();
-            defer segment_file.lock.unlock();
+        self.key_to_value_metadata.deinit();
 
-            segment_file.closeAssumeLocked();
+        for (self.segment_files.items) |segment_file| {
+            segment_file.unref();
         }
 
         self.segment_files.deinit();
@@ -402,22 +428,24 @@ const Store = struct {
     // We may want to store a timestamp of when the key was written so we can e.g. provide
     // guarantees that no key/values more recent than e.g. x minutes will ever go stale.
     pub fn get(self: *Self, key: []const u8) ?ValueProxy {
+        // TODO(Apaar): We could eventually shard the keyspace to better scale concurrent reads and writes
+
         // FIXME(Apaar): Deadlock potential here
-        self.key_to_value_metadata_lock.lockShared();
-        defer self.key_to_value_metadata_lock.unlockShared();
+        self.lock.lockShared();
+        defer self.lock.unlockShared();
 
         const value_metadata = self.key_to_value_metadata.get(key) orelse return null;
 
-        var file = &self.segment_files.items[value_metadata.segment_files_index];
+        var file = value_metadata.file;
 
         file.lock.lockShared();
         defer file.lock.unlockShared();
 
+        // This ref is for the ValueProxy
         file.refAssumeLocked();
 
         return .{
-            .store = self,
-            .segment_file_index = value_metadata.segment_files_index,
+            .segment_file = file,
             .offset = value_metadata.offset,
             .len = value_metadata.len,
         };
@@ -451,34 +479,46 @@ const Store = struct {
             },
         };
 
-        // This is the active segment file
-        const segment_file_index = self.segment_files.items.len - 1;
-
         var file = blk: {
+            // We need an exclusive lock because we don't want the file shifting around
+            // underneath us while we grab the active one.
             self.lock.lock();
             defer self.lock.unlock();
 
-            var file = self.segment_files.items[segment_file_index];
+            var file = self.segment_files.getLast();
+
+            file.lock.lockShared();
+            defer file.lock.unlockShared();
+
+            // Make sure to increment the refcount before unlocking our exclusive lock because
+            // it could no longer be referenced by segment_files.items after we unlock.
+            //
+            // Note that this ref is _not_ for the pointer we put into ValueMetadata! That could
+            // lead to having lots of refs to a file (one for every single key in the file). Instead,
+            // I treat the entire store + the scope of this function/thread as one ref each.
+            file.refAssumeLocked();
 
             break :blk file;
         };
 
-        // FIXME(Apaar): Actually, we could have two threads which both write to a file
-        // just as it's about to go over the max_segment_size, and one of them will push it over,
-        // at which point this is no longer technically the segment file.
-        //
-        // Thankfully, we store the index in a local variable above, but what if things get compacted
-        // in that time? Then maybe the file will no longer even exist?? That would be wacko.
-        //
-        // Maybe we should avoid the whole locking thing and just use atomic refcounts.
-        const pos = try file.getPos();
+        // We ref'd it above for the sake of this thread that's writing, so unref once we're outta here.
+        defer file.unref();
 
-        try file.writevAll(&iovecs);
+        const pos = blk: {
+            // We take an exclusive lock on the file to prevent writes from interleaving
+            file.lock.lock();
+            defer file.lock.unlock();
+
+            const pos = try file.file.getPos();
+            try file.file.writevAll(&iovecs);
+
+            break :blk pos;
+        };
 
         const value_metadata = ValueMetadata{
+            .file = file,
             .offset = pos + op_type_buf.len + key_len_buf.len + value_len_buf.len + key.len,
             .len = value.len,
-            .segment_files_index = @intCast(segment_file_index),
         };
 
         {
@@ -504,8 +544,8 @@ const Store = struct {
             var dir = try std.fs.cwd().openDir(self.dir_path, .{});
             defer dir.close();
 
-            var new_file = try dir.createFile(&path, .{ .read = true });
-            errdefer new_file.close();
+            var new_file = try SegmentFile.create(self.allocator, &dir, &path, .{ .read = true });
+            errdefer new_file.unref();
 
             self.lock.lock();
             defer self.lock.unlock();
@@ -515,7 +555,10 @@ const Store = struct {
     }
 
     pub fn del(self: *Self, key: []const u8) !bool {
-        {
+        var file = blk: {
+            self.lock.lock();
+            defer self.lock.unlock();
+
             // We do not record a delete operation if the key does not exist because that means a delete
             // operation was already recorded prior.
             const removed = self.key_to_value_metadata.fetchRemove(key) orelse return false;
@@ -523,9 +566,15 @@ const Store = struct {
             // TODO(Apaar): Do not assume we always own the keys
             self.allocator.free(removed.key);
 
-            var file = self.segment_files.items[self.segment_files.items.len - 1];
-            _ = file;
-        }
+            var file = self.segment_files.getLast();
+
+            file.lock.lockShared();
+            defer file.lock.unlockShared();
+
+            file.refAssumeLocked();
+
+            break :blk file;
+        };
 
         const op_type_buf = [_]u8{@intFromEnum(SegmentOpType.del)};
         const key_len_buf: [8]u8 = @bitCast(key.len);
@@ -544,9 +593,16 @@ const Store = struct {
                 .iov_len = key.len,
             },
         };
-        _ = iovecs;
 
-        // try file.writevAll(&iovecs);
+        defer file.unref();
+
+        // We need an exclusive lock while writing to prevent writes from interleaving.
+        // Note that we do this after the `defer file.unref` to ensure th unref happens
+        // _after_ we've unlocked the file; otherwise we'd deadlock.
+        file.lock.lock();
+        defer file.lock.unlock();
+
+        try file.file.writevAll(&iovecs);
 
         return true;
     }
@@ -579,7 +635,11 @@ const Store = struct {
     // TO BE CONTINUED
 
     pub fn compactForMillis(self: *Self, ms: u64) !void {
+        _ = ms;
+
+        // TODO(Apaar): Implement cancellation after a certain amount of time has elapsed
         const start_time = timeInMillis();
+        _ = start_time;
 
         // We don't want to interact with self.segment_files and self.key_to_value_metadata as much as possible,
         // so we open our directory again here rather than accessing either of these.
@@ -590,11 +650,11 @@ const Store = struct {
         // max_segment_size for an "inactive" segment.
         const compacted_file_path = randPath();
 
-        var compacted_file = try dir.dir.openFile(&compacted_file_path, .{
+        var compacted_file = try SegmentFile.create(self.allocator, &dir.dir, compacted_file_path, .{
             .mode = .write_only,
         });
         errdefer {
-            // TODO(Apaar): Delete the compacted file
+            compacted_file.unref();
         }
 
         var temp_key_buf = std.ArrayList(u8).init(self.allocator);
@@ -633,18 +693,6 @@ const Store = struct {
         var dir_iter = dir.iterate();
 
         while (try dir_iter.next()) |dir_entry| {
-            const cur_time = timeInMillis();
-
-            if (cur_time - start_time >= ms) {
-                // TODO(Apaar): Should probably warn the caller that we had insufficient time to even get to the
-                // compaction stage.
-                //
-                // Alternatively, the caller should be able to provide a struct with how long each phase of the
-                // compaction should have (gathering the ops, writing to the compacted file). If they have an
-                // overwrite/delete-heavy workload, the gathering would take longer than the compaction.
-                return;
-            }
-
             // TODO(Apaar): Do not assume the nested files are always regular files
             std.debug.assert(dir_entry.kind == .file);
 
@@ -662,12 +710,22 @@ const Store = struct {
             }
 
             const compactable_file_index = compactable_files.items.len;
+            _ = compactable_file_index;
             compactable_files.append(file);
+        }
 
-            // TODO(Apaar): Traverse the files in "last modified time" descending so that
-            // we see the most recent writes first, and then skip duplicate writes (e.g. a key
-            // that already exists, don't bother copying it to the compacted file).
+        if (compactable_files.items.len == 0) {
+            return;
+        }
 
+        // TODO(Apaar): Traverse the files in "last modified time" descending so that
+        // we see the most recent writes first, and then skip duplicate writes (e.g. a key
+        // that already exists, don't bother copying it to the compacted file).
+        //
+        // This way we can avoid the key_to_set_op_range map altogether. We'll just need to
+        // remember which keys have been deleted.
+
+        for (compactable_files.items, 0..) |file, compactable_file_index| {
             // HACK(Apaar): Mostly copypasta from `init`
             while (try readSegmentOpHeader(&file)) |header| {
                 switch (header) {
@@ -743,7 +801,7 @@ const Store = struct {
                 range.compactable_file_index
             ];
 
-            try src_file.copyRangeAll(range.pos, compacted_file, try compacted_file.getEndPos(), range.size);
+            try src_file.copyRangeAll(range.pos, compacted_file.file, try compacted_file.file.getEndPos(), range.size);
         }
 
         // Restart the iterator
@@ -770,6 +828,22 @@ const Store = struct {
                 .segment_files_index = 0,
             };
         }
+
+        // Unref all the segment files except for the last one (active)
+        self.lock.lock();
+        defer self.lock.unlock();
+
+        for (0..self.segment_files.items.len - 1) |segment_file_index| {
+            self.segment_files.items[segment_file_index].unref();
+        }
+
+        var active_segment_file = self.segment_files.getLast();
+
+        // Just need room for the compacted file and the active file
+        self.segment_files.resize(2);
+
+        self.segment_files.items[0] = compacted_file;
+        self.segment_files.items[1] = active_segment_file;
     }
 };
 
@@ -797,7 +871,8 @@ test "set and get" {
 
     try store.setAllocKey("hello", "world");
 
-    const proxy = store.get("hello").?;
+    var proxy = store.get("hello").?;
+    defer proxy.deinit();
 
     var value = try proxy.readAlloc(std.testing.allocator);
     defer std.testing.allocator.free(value);
@@ -818,7 +893,8 @@ test "set, close, open, and get" {
     var store = try Store.init(std.testing.allocator, &dir_path, test_max_segment_size);
     defer store.deinit();
 
-    const proxy = store.get("hello").?;
+    var proxy = store.get("hello").?;
+    defer proxy.deinit();
 
     var value = try proxy.readAlloc(std.testing.allocator);
     defer std.testing.allocator.free(value);
@@ -835,7 +911,7 @@ test "set, del, and get" {
     try store.setAllocKey("hello", "world");
     try std.testing.expect(try store.del("hello"));
 
-    const proxy = store.get("hello");
+    var proxy = store.get("hello");
     try std.testing.expectEqual(proxy, null);
 }
 
@@ -853,6 +929,6 @@ test "set, del, close, open, and get" {
     var store = try Store.init(std.testing.allocator, &dir_path, test_max_segment_size);
     defer store.deinit();
 
-    const proxy = store.get("hello");
+    var proxy = store.get("hello");
     try std.testing.expectEqual(@as(?ValueProxy, null), proxy);
 }
