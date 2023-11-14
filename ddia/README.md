@@ -5,6 +5,29 @@ usually sufficient but you can also have a folder for each.
 
 ## Schedule
 
+### Week 9 (Nov 14 - Nov 21)
+
+Read up until "Handling Write Conflicts" on page 171.
+
+1. Write a logical replication log (see page 160) for operations against your key value store.
+Every node will write this log.
+
+2. Create a config file that stores which node is the leader (and how to contact it) and which nodes are
+replicas.
+
+3. Write a program which examines the logical log and ships these writes to other running instances
+of your database (follower). Note that this must be done over the network. It should load the location
+of these replicas from the aforementioned config file. This program is only going to run on the "leader" node.
+
+4. Update your client to also read the config file and contact the leader for all write requests
+and contact either the leader or a replica for read requests.
+
+**BONUS** Create a program (`config-daemon`) that monitors the health of every node.
+
+**BONUS** Add endpoints to your config-daemon to query the configuration of the network. For example, you should be able to ask
+it for all the nodes and their IPs/URLs, and their current state (leader/follower). This should be used by your client to
+determine who to make queries to rather than reading a config file
+
 ### Week 8 (Nov 7 - Nov 14)
 
 Read up until "Problems with Replication Lag".
