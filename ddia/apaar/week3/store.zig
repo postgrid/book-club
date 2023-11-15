@@ -262,7 +262,7 @@ const Store = struct {
     dir_path: []const u8,
     max_segment_size: u64,
 
-    dir: std.fs.IterableDir,
+    dir: *std.fs.IterableDir,
 
     // TODO(Apaar): Make a "Locked" struct or something
     lock: std.Thread.RwLock,
@@ -279,10 +279,15 @@ const Store = struct {
 
         @memcpy(dir_path_copy, dir_path);
 
+        // We have to use indirection here because we need the pointer to be stable (it escapes this scope and
+        // store could move around anywhere).
+        var dir_ptr = try allocator.create(std.fs.IterableDir);
+        dir_ptr.* = try std.fs.cwd().makeOpenPathIterable(dir_path, .{});
+
         var self = Self{
             .allocator = allocator,
             .dir_path = dir_path_copy,
-            .dir = try std.fs.cwd().makeOpenPathIterable(dir_path, .{}),
+            .dir = dir_ptr,
             .lock = .{},
             .segment_files = std.ArrayList(*SegmentFile).init(allocator),
             .key_to_value_metadata = KeyToValueMetadataMap.init(allocator),
@@ -423,6 +428,9 @@ const Store = struct {
         }
 
         self.segment_files.deinit();
+
+        self.dir.close();
+        self.allocator.destroy(self.dir);
 
         self.allocator.free(self.dir_path);
     }
