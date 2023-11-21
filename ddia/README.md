@@ -5,6 +5,12 @@ usually sufficient but you can also have a folder for each.
 
 ## Schedule
 
+### Week 10 (Nov 21 - Nov 28)
+
+Read up until "Detecting Concurrent Writes" on page 184.
+
+Continue the exercise from last week.
+
 ### Week 9 (Nov 14 - Nov 21)
 
 Read up until "Handling Write Conflicts" on page 171.
