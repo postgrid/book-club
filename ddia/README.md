@@ -5,6 +5,10 @@ usually sufficient but you can also have a folder for each.
 
 ## Schedule
 
+### Week 11 (Nov 28 - Dec 5)
+
+Continue catching up on readings and assignment from last week.
+
 ### Week 10 (Nov 21 - Nov 28)
 
 Read up until "Detecting Concurrent Writes" on page 184.
