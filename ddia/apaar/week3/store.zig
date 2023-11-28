@@ -976,3 +976,25 @@ test "set, compact, and get" {
 
     try std.testing.expectEqualStrings("universe", value);
 }
+
+test "set, get, compact, and retrieve from previous get" {
+    var dir_path = tempPath();
+
+    var store = try Store.init(std.testing.allocator, &dir_path, test_max_segment_size);
+
+    defer store.deinit();
+
+    try store.setAllocKey("hello", "world");
+
+    var proxy = store.get("hello").?;
+    defer proxy.deinit();
+
+    try store.setAllocKey("hello", "universe");
+
+    try store.compactForMillis(10);
+
+    var value = try proxy.readAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(value);
+
+    try std.testing.expectEqualStrings("world", value);
+}
