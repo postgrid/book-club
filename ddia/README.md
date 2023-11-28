@@ -25,7 +25,7 @@ Every node will write this log.
 2. Create a config file that stores which node is the leader (and how to contact it) and which nodes are
 replicas.
 
-3. Write a program which examines the logical log and ships these writes to other running instances
+3. Write a program which examines the logical log and ships these writes to other running instances (or vice versa)
 of your database (follower). Note that this must be done over the network. It should load the location
 of these replicas from the aforementioned config file. This program is only going to run on the "leader" node.
 
