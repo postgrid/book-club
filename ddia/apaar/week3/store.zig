@@ -857,6 +857,40 @@ const Store = struct {
     }
 };
 
+// Export C functions to use our store from any language
+const CBuffer = extern struct {
+    ptr: [*c]u8,
+    len: u64,
+};
+
+const EMPTY_C_BUFFER = CBuffer{
+    .ptr = null,
+    .len = 0,
+};
+
+export fn Store_create(dir_path: [*:0]const u8, max_segment_size: u64) ?*Store {
+    const dir_path_slice = std.mem.span(dir_path);
+    const store = std.heap.c_allocator.create(Store) catch return null;
+
+    store.* = Store.init(std.heap.c_allocator, dir_path_slice, max_segment_size) catch return null;
+
+    return store;
+}
+
+export fn Store_getAllocValue(store: *Store, key: [*:0]const u8) CBuffer {
+    const key_slice = std.mem.span(key);
+
+    var proxy = store.get(key_slice) orelse return EMPTY_C_BUFFER;
+    defer proxy.deinit();
+
+    const ptr = proxy.readAlloc(std.heap.c_allocator) catch return EMPTY_C_BUFFER;
+
+    return .{
+        .ptr = ptr.ptr,
+        .len = proxy.len,
+    };
+}
+
 const temp_prefix = "tmp/";
 const TempPath = [temp_prefix.len + rand_path_len]u8;
 
