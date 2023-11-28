@@ -556,6 +556,14 @@ const Store = struct {
             // Append a new segment file because this last one is too big
             const path = randPath();
 
+            // HACK(Apaar): Looks like WSL doesn't have the timestamp resolution necessary to sort the files correctly.
+            // FIXME(Apaar): We should probably just come up with a path that is lexicographically greater than the
+            // path of the active segment file. Then we can sort them lexicographically in the compaction step and call it
+            // a day.
+            //
+            // Right now I'll just sleep for 10 milliseconds lol.
+            std.time.sleep(10_000_000);
+
             var new_file = try SegmentFile.create(self.allocator, &self.dir.dir, &path, .{ .read = true });
             errdefer new_file.unref();
 
