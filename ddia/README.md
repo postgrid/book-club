@@ -20,13 +20,13 @@ Continue the exercise from last week.
 Read up until "Handling Write Conflicts" on page 171.
 
 1. Write a logical replication log (see page 160) for operations against your key value store.
-Every node will write this log.
+You should probably do this in your server program. Every node will write this log.
 
 2. Create a config file that stores which node is the leader (and how to contact it) and which nodes are
 replicas.
 
-3. Write a program which examines the logical log and ships these writes to other running instances (or vice versa)
-of your database (follower). Note that this must be done over the network. It should load the location
+3. Update your server to ship these writes to other running instances (or vice versa)
+of your database (followers). Note that this must be done over the network. It should load the location
 of these replicas from the aforementioned config file. This program is only going to run on the "leader" node.
 
 4. Update your client to also read the config file and contact the leader for all write requests
