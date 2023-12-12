@@ -5,6 +5,10 @@ usually sufficient but you can also have a folder for each.
 
 ## Schedule
 
+### Week 13 (Dec 12 - Dec 19)
+
+Continue with last week's reading and continue on the exercise.
+
 ### Week 12 (Dec 5 - Dec 12)
 
 Read up until "Partitioning and Secondary Indexes" on page 206.
