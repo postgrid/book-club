@@ -5,6 +5,10 @@ usually sufficient but you can also have a folder for each.
 
 ## Schedule
 
+### Week 14 (Dec 19 - Dec 26)
+
+Read up until "Request Routing" on page 214.
+
 ### Week 13 (Dec 12 - Dec 19)
 
 Continue with last week's reading and continue on the exercise.
