@@ -5,6 +5,18 @@ usually sufficient but you can also have a folder for each.
 
 ## Schedule
 
+### Week 15 (Jan 9 - Jan 16)
+
+Read up until "The meaning of ACID" on page 222.
+
+1. Create a data structure that represents a cluster of nodes. It should offer the ability to add a node, remove a node, set a key's value, get a key's value, and delete a key-value. Initially implement this by partitioning by key range. You don't have to have an efficient rebalancing strategy for this part.
+2. Implement partitioning by key hash.
+3. Implement rebalancing using a fixed number of partitions
+
+**BONUS** Implement dynamic partitioning.
+
+Note that all of this can be done in a single program and doesn't need to be a networked application. Basically you'll be emulating a partitioned database.
+
 ### Week 14 (Dec 19 - Dec 26)
 
 Read up until "Request Routing" on page 214.
