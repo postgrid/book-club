@@ -5,6 +5,12 @@ usually sufficient but you can also have a folder for each.
 
 ## Schedule
 
+### Week 16 (Jan 16 - Jan 23)
+
+Read up until "Handling errors and aborts" on page 231.
+
+Continue on the exercise from last week.
+
 ### Week 15 (Jan 9 - Jan 16)
 
 Read up until "The meaning of ACID" on page 222.
