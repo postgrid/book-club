@@ -5,6 +5,10 @@ usually sufficient but you can also have a folder for each.
 
 ## Schedule
 
+### Week 17 (Jan 23 - Jan 30)
+
+Continue on content from previous weeks.
+
 ### Week 16 (Jan 16 - Jan 23)
 
 Read up until "Handling errors and aborts" on page 231.
