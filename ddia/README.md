@@ -5,6 +5,17 @@ usually sufficient but you can also have a folder for each.
 
 ## Schedule
 
+### Week 18 (Jan 30 - Feb 6)
+
+Re-read the section up till page 231 (or continue forward, up to you).
+
+1. Create a program that simulates a key-value store (all in-memory). Allow the user to initiate a transaction and then perform multiple get and set operations within it and then commit the transaction.
+2. Add an abort command to your program such that no writes from the currently running transaction end up being committed.
+
+Note that your simulated key-value store appear to have serializable transactions; that is, every transaction acts as if it were running in sequence. Also, reads that occur while a transaction is in-flight should not be able to view writes occurring in that transaction. Finally, reads within a transaction should be able to read its previous writes (e.g. you should be able to run `value = GET key`, `SET key (value + 1)` multiple times and get the correct `value`).
+
+**BONUS** Allow setting constraints on a key such that any transaction that attempts to set it to an invalid value will immediately fail and abort.
+
 ### Week 17 (Jan 23 - Jan 30)
 
 Continue on content from previous weeks.
