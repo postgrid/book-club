@@ -70,6 +70,24 @@ COMMIT_TX 3
 
 # Output: 13
 GET x
+
+# Output: 4
+BEGIN_TX
+# Output: 5
+BEGIN_TX
+
+# Sets x to 14 within transaction 4
+# Outputs previous value: 13
+SET_TX 4 x 14
+
+COMMIT_TX 4
+
+# Output: 13
+GET_TX 5 x
+# Output: 13
+SET_TX 5 x 15
+
+COMMIT_TX 5
 ```
 
 ### Week 17 (Jan 23 - Jan 30)
