@@ -5,6 +5,14 @@ usually sufficient but you can also have a folder for each.
 
 ## Schedule
 
+### Week 20
+
+Complete the assignment from Week 18 because it is fun.
+
+### Week 19 (Feb 6 - Feb 13)
+
+Break.
+
 ### Week 18 (Jan 30 - Feb 6)
 
 Re-read the section up till page 231 (or continue forward, up to you).
