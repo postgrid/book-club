@@ -11,6 +11,10 @@ Re-read the section up till page 231 (or continue forward, up to you).
 
 1. Create a program that simulates a key-value store (all in-memory). Allow the user to initiate a transaction and then perform multiple get and set operations within it and then commit the transaction.
 2. Add an abort command to your program such that no writes from the currently running transaction end up being committed.
+3. Implement snapshot isolation similar to example here: https://www.sqlshack.com/snapshot-isolation-in-sql-server/
+   Basically, if there was another `SET` operation on the same key(s) that committed between when you started your transaction
+   and when you committed it, and it set the value to something different than what your transaction sets the value to (i.e. conflict)
+   then fail the transaction.
 
 Note that your simulated key-value store appear to have serializable transactions; that is, every transaction acts as if it were running in sequence. Also, reads that occur while a transaction is in-flight should not be able to view writes occurring in that transaction. Finally, reads within a transaction should be able to read its previous writes (e.g. you should be able to run `value = GET key`, `SET key (value + 1)` multiple times and get the correct `value`).
 
@@ -87,6 +91,7 @@ GET_TX 5 x
 # Output: 13
 SET_TX 5 x 15
 
+# Output: (CONFLICT)
 COMMIT_TX 5
 ```
 
