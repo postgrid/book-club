@@ -27,7 +27,7 @@ let exec_one db cmd =
     | Cmd.Get { key } -> Db.get db key |> conv_opt
     | Cmd.Set { key; value } -> Db.set db key value |> conv_opt
   in
-  Printf.sprintf "%s = %s" (Cmd.to_string cmd) res
+  Printf.sprintf "%s outputs %s" (Cmd.to_string cmd) res
 
 let exec_all db cmds =
   let rec loop acc cmds =
