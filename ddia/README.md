@@ -5,7 +5,7 @@ usually sufficient but you can also have a folder for each.
 
 ## Schedule
 
-### Week 20
+### Week 20 (Feb 27 - March 5)
 
 Complete the assignment from Week 18 because it is fun.
 
