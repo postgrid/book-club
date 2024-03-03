@@ -1,5 +1,7 @@
 let _example_run =
   {|
+CONSTRAINT_INT_GTE x 15
+
 BEGIN_TX
 SET_TX 1 x 10
 COMMIT_TX 1
@@ -9,7 +11,7 @@ GET x
 BEGIN_TX
 BEGIN_TX
 
-SET_TX 3 x 30
+SET_TX 3 x a
 
 COMMIT_TX 3
 
@@ -18,7 +20,7 @@ GET_TX 2 x
 ROLLBACK_TX 2
 |}
 
-let conflict_run =
+let _conflict_run =
   {|
 # Comment lines start with '#'
 
@@ -97,7 +99,7 @@ let () =
   Printexc.record_backtrace true;
   let db = Db.create 16 in
   let cmds =
-    Cmd_reader.read_all_skip_invalid (String.split_on_char '\n' conflict_run)
+    Cmd_reader.read_all_skip_invalid (String.split_on_char '\n' _example_run)
   in
   let res = Cmd_runner.exec_all db cmds in
   assert (List.length db.txs = 0);

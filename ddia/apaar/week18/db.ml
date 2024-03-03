@@ -12,12 +12,18 @@ type tx = {
 
 type t = {
   data : string Stringtbl.t;
+  constraints : Constraint_set.t Stringtbl.t;
   mutable tx_counter : int;
   mutable txs : tx list;
 }
 
 let create init_count =
-  { data = Stringtbl.create init_count; tx_counter = 1; txs = [] }
+  {
+    data = Stringtbl.create init_count;
+    constraints = Stringtbl.create init_count;
+    tx_counter = 1;
+    txs = [];
+  }
 
 let start_tx t =
   let tid = t.tx_counter in
@@ -41,6 +47,13 @@ let set_tx t tx key value =
   Stringtbl.replace tx.writes key (Some value);
   prev_value
 
+let add_constraint t c key =
+  let prev = Stringtbl.find_opt t.constraints key in
+  match prev with
+  | Some prev_c ->
+      Stringtbl.replace t.constraints key (Constraint_set.add prev_c c)
+  | None -> Stringtbl.replace t.constraints key (Constraint_set.singleton c)
+
 (* Remember the DB value corresponding to `key` if `tx` doesn't
    already recall one or hasn't already modified that key.
 
@@ -52,6 +65,7 @@ let remember_old_value t tx key =
     Stringtbl.replace tx.reads key db_value
 
 exception Conflict of string
+exception ConstraintFailure of string * Constraint_set.c
 
 let commit_tx t tx =
   let rec loop = function
@@ -91,7 +105,12 @@ let commit_tx t tx =
   Stringtbl.iter
     (fun key value ->
       match value with
-      | Some v -> Stringtbl.replace t.data key v
+      | Some v ->
+          let cs = Stringtbl.find_opt t.constraints key in
+          (try Option.iter (fun cs -> Constraint_set.check_raise cs v) cs
+           with Constraint_set.ConstraintFailure c ->
+             raise (ConstraintFailure (key, c)));
+          Stringtbl.replace t.data key v
       | None -> Stringtbl.remove t.data key)
     tx.writes;
   (* Remove the transaction from the list of transactions *)

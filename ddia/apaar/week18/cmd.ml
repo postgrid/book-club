@@ -6,6 +6,9 @@ type t =
   | RollbackTx of { tid : int }
   | Get of { key : string }
   | Set of { key : string; value : string }
+  | ConstraintIsInt of { key : string }
+  | ConstraintIntGte of { key : string; value : int }
+  | ConstraintIntLte of { key : string; value : int }
 
 let to_string t =
   match t with
@@ -16,3 +19,6 @@ let to_string t =
   | RollbackTx { tid } -> Printf.sprintf "ROLLBACK_TX %d" tid
   | Get { key } -> Printf.sprintf "GET %s" key
   | Set { key; value } -> Printf.sprintf "SET %s %s" key value
+  | ConstraintIsInt { key } -> Printf.sprintf "CONSTRAINT_IS_INT %s" key
+  | ConstraintIntGte { key; value } -> Printf.sprintf "CONSTRAINT_INT_GTE %s %d" key value
+  | ConstraintIntLte { key; value } -> Printf.sprintf "CONSTRAINT_INT_LTE %s %d" key value

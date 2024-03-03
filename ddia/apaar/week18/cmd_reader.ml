@@ -12,6 +12,15 @@ let read_one line =
   | "ROLLBACK_TX" -> Some (Cmd.RollbackTx { tid = int_of_string parts.(1) })
   | "GET" -> Some (Cmd.Get { key = parts.(1) })
   | "SET" -> Some (Cmd.Set { key = parts.(1); value = parts.(2) })
+  | "CONSTRAINT_IS_INT" -> Some (Cmd.ConstraintIsInt { key = parts.(1) })
+  | "CONSTRAINT_INT_GTE" ->
+      Some
+        (Cmd.ConstraintIntGte
+           { key = parts.(1); value = int_of_string parts.(2) })
+  | "CONSTRAINT_INT_LTE" ->
+      Some
+        (Cmd.ConstraintIntLte
+           { key = parts.(1); value = int_of_string parts.(2) })
   | _ -> None
 
 let read_all_skip_invalid lines =
