@@ -19,7 +19,11 @@ let exec_one db cmd =
         try
           Db.commit_tx db tx;
           "()"
-        with Db.Conflict s -> Printf.sprintf "(CONFLICT %s)" s)
+        with Db.Conflict s ->
+          (* Similar to ON CONFLICT ROLLBACK, though you can imagine a user might just do other
+             things in the transaction and retry committing it after *)
+          Db.rollback_tx db tx;
+          Printf.sprintf "(CONFLICT %s)" s)
     | Cmd.RollbackTx { tid } ->
         let tx = Db.find_tx db tid in
         Db.rollback_tx db tx;

@@ -100,4 +100,5 @@ let () =
     Cmd_reader.read_all_skip_invalid (String.split_on_char '\n' conflict_run)
   in
   let res = Cmd_runner.exec_all db cmds in
+  assert (List.length db.txs = 0);
   List.iter print_endline res
