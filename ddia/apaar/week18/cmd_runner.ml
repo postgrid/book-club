@@ -14,10 +14,12 @@ let exec_one db cmd =
         let tx = Db.find_tx db tid in
         let prev_value = Db.set_tx db tx key value in
         conv_opt prev_value
-    | Cmd.CommitTx { tid } ->
+    | Cmd.CommitTx { tid } -> (
         let tx = Db.find_tx db tid in
-        Db.commit_tx db tx;
-        "()"
+        try
+          Db.commit_tx db tx;
+          "()"
+        with Db.Conflict s -> Printf.sprintf "(CONFLICT %s)" s)
     | Cmd.RollbackTx { tid } ->
         let tx = Db.find_tx db tid in
         Db.rollback_tx db tx;

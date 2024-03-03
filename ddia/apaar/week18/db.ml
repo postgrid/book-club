@@ -51,6 +51,8 @@ let remember_old_value t tx key =
     let db_value = Stringtbl.find_opt t.data key in
     Stringtbl.replace tx.reads key db_value
 
+exception Conflict of string
+
 let commit_tx t tx =
   let rec loop = function
     | other_tx :: txs ->
@@ -64,6 +66,27 @@ let commit_tx t tx =
     | _ -> ()
   in
   loop t.txs;
+
+  (* Check if any of the values we are writing to were changed by another transaction
+     in between the time when we started and now. We can detect this by checking if
+     a key in tx.writes is present in tx.reads. If it is, then we check whether the
+     value in the database is still the same as what it is in tx.reads (meaning that
+     the assumptions about the relevant state still hold going into this). If it isn't,
+     then there's a conflict. *)
+  Stringtbl.iter
+    (fun key value ->
+      let read_v = Stringtbl.find_opt tx.reads key in
+      if Option.is_none read_v then ()
+      else
+        let db_v = Stringtbl.find_opt t.data key in
+        (* If the exact same value we're gonna write is already present in the DB,
+           there's really no conflict *)
+        if db_v = value then ()
+          (* If the value in the database doesn't match what it was at the start of tx,
+             then there's a conflict. *)
+        else if db_v <> Option.get read_v then raise (Conflict key))
+    tx.writes;
+
   (* Update the database now that we've updated the other transactions that may care *)
   Stringtbl.iter
     (fun key value ->
