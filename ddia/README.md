@@ -5,6 +5,10 @@ usually sufficient but you can also have a folder for each.
 
 ## Schedule
 
+### Week 21 (March 5 - March 12)
+
+Read up until "Preventing Lost Updates" on page 242.
+
 ### Week 20 (Feb 27 - March 5)
 
 Complete the assignment from Week 18 because it is fun.
