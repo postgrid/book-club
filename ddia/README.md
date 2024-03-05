@@ -5,6 +5,171 @@ usually sufficient but you can also have a folder for each.
 
 ## Schedule
 
+### Week 20 (Feb 27 - March 5)
+
+Complete the assignment from Week 18 because it is fun.
+
+### Week 19 (Feb 6 - Feb 13)
+
+Break.
+
+### Week 18 (Jan 30 - Feb 6)
+
+Re-read the section up till page 231 (or continue forward, up to you).
+
+1. Create a program that simulates a key-value store (all in-memory). Allow the user to initiate a transaction and then perform multiple get and set operations within it and then commit the transaction.
+2. Add an abort command to your program such that no writes from the currently running transaction end up being committed.
+3. Implement snapshot isolation similar to example here: https://www.sqlshack.com/snapshot-isolation-in-sql-server/
+   Basically, if there was another `SET` operation on the same key(s) that committed between when you started your transaction
+   and when you committed it, and it set the value to something different than what your transaction sets the value to (i.e. conflict)
+   then fail the transaction.
+
+Note that your simulated key-value store appear to have serializable transactions; that is, every transaction acts as if it were running in sequence. Also, reads that occur while a transaction is in-flight should not be able to view writes occurring in that transaction. Finally, reads within a transaction should be able to read its previous writes (e.g. you should be able to run `value = GET key`, `SET key (value + 1)` multiple times and get the correct `value`).
+
+**BONUS** Allow setting constraints on a key such that any transaction that attempts to set it to an invalid value will immediately fail and abort.
+
+Sample input:
+```
+# Comment lines start with '#'
+
+# Begin a transaction, should output transaction ID (monotonically increasing values): 1
+BEGIN_TX
+
+# SET_TX (transaction ID) (key) (value, must be numeric)
+# Outputs the previous value of x at the time when this transaction was created: ()
+SET_TX 1 x 10
+
+# GET_TX (transaction ID) (key) outputs either the number at the key (in this transaction) or () if none 
+GET_TX 1 x
+
+# Output: 10
+SET_TX 1 x 11
+
+# Output: 11
+GET_TX 1 x
+
+# GET (key) tries to get the value at 'key' outside of a transaction, in this case () since
+# 'x' has not been set.
+GET x
+
+# COMMIT_TX (transaction ID) commits the transaction with the given ID, making its changes visible to all future requests
+# Output: ()
+COMMIT_TX 1
+
+# Output: 2
+BEGIN_TX
+# Output: 3
+BEGIN_TX
+
+# Output: 11
+GET_TX 2 x
+
+# Output: 11
+SET_TX 2 x 12
+
+# Output: 11
+# Since it should not be able to see the modifications made by TX 2
+GET_TX 3 x
+
+# Output: 11
+SET_TX 3 x 13
+
+# Output: ()
+ROLLBACK_TX 2
+
+# Output: ()
+COMMIT_TX 3
+
+# Output: 13
+GET x
+
+# Output: 4
+BEGIN_TX
+# Output: 5
+BEGIN_TX
+
+# Sets x to 14 within transaction 4
+# Outputs previous value: 13
+SET_TX 4 x 14
+
+COMMIT_TX 4
+
+# Output: 13
+GET_TX 5 x
+# Output: 13
+SET_TX 5 x 15
+
+# Output: (CONFLICT)
+COMMIT_TX 5
+```
+
+### Week 17 (Jan 23 - Jan 30)
+
+Continue on content from previous weeks.
+
+### Week 16 (Jan 16 - Jan 23)
+
+Read up until "Handling errors and aborts" on page 231.
+
+Continue on the exercise from last week.
+
+### Week 15 (Jan 9 - Jan 16)
+
+Read up until "The meaning of ACID" on page 222.
+
+1. Create a data structure that represents a cluster of nodes. It should offer the ability to add a node, remove a node, set a key's value, get a key's value, and delete a key-value. Initially implement this by partitioning by key range. You don't have to have an efficient rebalancing strategy for this part.
+2. Implement partitioning by key hash.
+3. Implement rebalancing using a fixed number of partitions
+
+**BONUS** Implement dynamic partitioning.
+
+Note that all of this can be done in a single program and doesn't need to be a networked application. Basically you'll be emulating a partitioned database.
+
+### Week 14 (Dec 19 - Dec 26)
+
+Read up until "Request Routing" on page 214.
+
+### Week 13 (Dec 12 - Dec 19)
+
+Continue with last week's reading and continue on the exercise.
+
+### Week 12 (Dec 5 - Dec 12)
+
+Read up until "Partitioning and Secondary Indexes" on page 206.
+
+### Week 11 (Nov 28 - Dec 5)
+
+Continue catching up on readings and assignment from last week.
+
+### Week 10 (Nov 21 - Nov 28)
+
+Read up until "Detecting Concurrent Writes" on page 184.
+
+Continue the exercise from last week.
+
+### Week 9 (Nov 14 - Nov 21)
+
+Read up until "Handling Write Conflicts" on page 171.
+
+1. Write a logical replication log (see page 160) for operations against your key value store.
+You should probably do this in your server program. Every node will write this log.
+
+2. Create a config file that stores which node is the leader (and how to contact it) and which nodes are
+replicas.
+
+3. Update your server to ship these writes to other running instances (or vice versa)
+of your database (followers). Note that this must be done over the network. It should load the location
+of these replicas from the aforementioned config file. This program is only going to run on the "leader" node.
+
+4. Update your client to also read the config file and contact the leader for all write requests
+and contact either the leader or a replica for read requests.
+
+**BONUS** Create a program (`config-daemon`) that monitors the health of every node.
+
+**BONUS** Add endpoints to your config-daemon to query the configuration of the network. For example, you should be able to ask
+it for all the nodes and their IPs/URLs, and their current state (leader/follower). This should be used by your client to
+determine who to make queries to rather than reading a config file
+
 ### Week 8 (Nov 7 - Nov 14)
 
 Read up until "Problems with Replication Lag".

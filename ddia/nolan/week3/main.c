@@ -8,12 +8,6 @@
 #include "file-index-map.h"
 #include "hash.h"
 
-typedef enum DBError
-{
-    DB_OKAY = 0U,
-    DB_FILE_ERROR = 1U
-} DBError;
-
 /**
  * To resume course after a failed checksum,
  * a random indicator is used before every key-value
@@ -47,10 +41,9 @@ const size_t PREFIX_SIZE = sizeof(__indicator_t) + sizeof(__keysize_t) + sizeof(
 
 typedef struct DB
 {
-    FileIndexHashMap map;
+    FileIndexHashMap *map;
     char *handle;
     FILE *file;
-    DBError error;
 } DB;
 
 /**
@@ -123,9 +116,26 @@ int _seekIndicator(FILE *file)
     return -1;
 }
 
-DB DBopen(char *handle)
+void DBClose(DB *db)
 {
-    DB db;
+    FileIndexClose(db->map);
+    free(db->handle);
+    fclose(db->file);
+    free(db);
+}
+
+typedef enum DBOpenError
+{
+    DB_OPEN_OKAY = 0U,
+    DB_OPEN_FILE_OPEN_ERROR = 1U,
+    DB_OPEN_FILE_READ_ERROR = 2U,
+} DBOpenError;
+
+DB *DBopen(char *handle, DBOpenError *error)
+{
+    DB *db = malloc(sizeof(DB));
+
+    db->map = FileIndexCreate();
 
     // FIXME initialize file index map
 
@@ -133,8 +143,8 @@ DB DBopen(char *handle)
 
     if (!file)
     {
-        db.error = DB_FILE_ERROR;
-        return db;
+        *error = DB_OPEN_FILE_OPEN_ERROR;
+        goto db_open_file_open_error;
     }
 
     _seekIndicator(file);
@@ -168,11 +178,11 @@ DB DBopen(char *handle)
 
             if (index.len)
             {
-                FileIndexSet(db.map, key, index);
+                FileIndexSet(db->map, key, index);
             }
             else
             {
-                FileIndexDelete(db.map, key);
+                FileIndexDelete(db->map, key);
             }
         }
         else
@@ -188,24 +198,46 @@ DB DBopen(char *handle)
 
     if (ferror(file))
     {
-        db.error |= DB_FILE_ERROR;
+        *error = DB_OPEN_FILE_READ_ERROR;
+        goto db_open_file_read_error;
     }
 
     return db;
+
+db_open_file_read_error:
+db_open_file_open_error:
+    DBClose(db);
+
+    return NULL;
 }
 
-Buffer DBGet(DB db, char *key)
+typedef enum DBGetError
 {
-    Buffer buff;
+    DB_GET_OKAY = 0U,
+    DB_GET_KEY_NOT_FOUND_ERROR = 1U,
+    DB_GET_FILE_OPEN_ERROR = 2U,
+    DB_GET_FILE_READ_ERROR = 4U
+} DBGetError;
 
-    FileIndex index = FileIndexGet(db.map, key);
+Buffer *DBGet(DB *db, char *key, DBGetError *error)
+{
+    Buffer *buff = malloc(sizeof(Buffer));
 
-    FILE *file = freopen(db.handle, "r", db.file);
+    bool found;
+    FileIndex index = FileIndexGet(db->map, key, &found);
+
+    if (!found)
+    {
+        *error = DB_GET_KEY_NOT_FOUND_ERROR;
+        goto db_get_key_not_found_error;
+    }
+
+    FILE *file = freopen(db->handle, "r", db->file);
 
     if (!file)
     {
-        db.error = DB_FILE_ERROR;
-        return buff;
+        *error = DB_GET_FILE_OPEN_ERROR;
+        goto db_get_file_open_error;
     }
 
     fsetpos(file, index.start);
@@ -213,31 +245,46 @@ Buffer DBGet(DB db, char *key)
     char *data = malloc(sizeof(char) * index.len);
     if (fread(data, sizeof(char), index.len, file) != 1)
     {
-        db.error = DB_FILE_ERROR;
-        return buff;
+        *error = DB_GET_FILE_READ_ERROR;
+        goto db_get_file_read_error;
     }
 
-    buff.data = data;
-    buff.len = index.len;
+    buff->data = data;
+    buff->len = index.len;
 
     return buff;
+
+db_get_file_read_error:
+db_get_file_open_error:
+db_get_key_not_found_error:
+
+    free(buff);
+    return NULL;
 }
 
-// TODO error codes
-int DBSet(DB db, char *key, Buffer value)
+typedef enum DBSetError
 {
-    FILE *file = freopen(db.handle, "a", db.file);
+    DB_SET_OKAY = 0U,
+    DB_SET_FILE_OPEN_ERROR = 1U,
+    DB_SET_FILE_WRITE_ERROR = 2U,
+    DB_SET_KEY_SIZE_TOO_LARGE = 4U,
+} DBSetError;
+
+void DBSet(DB *db, char *key, Buffer value, DBSetError *error)
+{
+    FILE *file = freopen(db->handle, "a", db->file);
 
     if (!file)
     {
-        db.error = DB_FILE_ERROR;
-        return -1;
+        *error = DB_SET_FILE_OPEN_ERROR;
+        goto db_set_file_open_error;
     }
 
     const size_t uncheckedKeySize = strlen(key) + sizeof(char);
     if (uncheckedKeySize > MAX_KEY_SIZE)
     {
-        return -1;
+        *error = DB_SET_KEY_SIZE_TOO_LARGE;
+        goto db_set_key_size_too_large;
     }
 
     const __keysize_t keySize = uncheckedKeySize;
@@ -268,13 +315,24 @@ int DBSet(DB db, char *key, Buffer value)
     const __uint32_t hash = Hash(payload + PREFIX_SIZE, bytesCopied - PREFIX_SIZE);
     memcpy(payload + bytesCopied, &hash, sizeof(__hash_t));
 
-    fwrite(payload, sizeof(char), payloadSize, file);
+    const size_t writeAmount = fwrite(payload, sizeof(char), payloadSize, file);
+
+    if (writeAmount != payloadSize)
+    {
+        *error = DB_SET_FILE_WRITE_ERROR;
+        goto db_set_file_write_error;
+    }
 
     free(payload);
 
     FileIndex index = {dataStart, value.len};
 
-    FileIndexSet(db.map, key, index);
+    FileIndexSet(db->map, key, index);
 
-    return 0;
+    return;
+
+db_set_file_write_error:
+    free(payload);
+db_set_key_size_too_large:
+db_set_file_open_error:
 }

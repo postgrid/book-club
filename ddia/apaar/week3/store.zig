@@ -187,8 +187,6 @@ const SegmentFile = struct {
     fn init(allocator: Allocator, dir: *std.fs.Dir, sub_path: []const u8, file: File) !*SegmentFile {
         var self = try allocator.create(SegmentFile);
 
-        std.debug.print("Creating {s}\n", .{sub_path});
-
         self.* = SegmentFile{
             .allocator = allocator,
             .sub_path = try allocator.alloc(u8, sub_path.len),
@@ -239,7 +237,6 @@ const SegmentFile = struct {
             self.file.close();
 
             if (self.delete_on_close) {
-                std.debug.print("Deleting {s}\n", .{self.sub_path});
                 self.dir.deleteFile(self.sub_path) catch {};
             }
 
@@ -262,7 +259,7 @@ const Store = struct {
     dir_path: []const u8,
     max_segment_size: u64,
 
-    dir: std.fs.IterableDir,
+    dir: *std.fs.IterableDir,
 
     // TODO(Apaar): Make a "Locked" struct or something
     lock: std.Thread.RwLock,
@@ -279,10 +276,15 @@ const Store = struct {
 
         @memcpy(dir_path_copy, dir_path);
 
+        // We have to use indirection here because we need the pointer to be stable (it escapes this scope and
+        // store could move around anywhere).
+        var dir_ptr = try allocator.create(std.fs.IterableDir);
+        dir_ptr.* = try std.fs.cwd().makeOpenPathIterable(dir_path, .{});
+
         var self = Self{
             .allocator = allocator,
             .dir_path = dir_path_copy,
-            .dir = try std.fs.cwd().makeOpenPathIterable(dir_path, .{}),
+            .dir = dir_ptr,
             .lock = .{},
             .segment_files = std.ArrayList(*SegmentFile).init(allocator),
             .key_to_value_metadata = KeyToValueMetadataMap.init(allocator),
@@ -424,6 +426,9 @@ const Store = struct {
 
         self.segment_files.deinit();
 
+        self.dir.close();
+        self.allocator.destroy(self.dir);
+
         self.allocator.free(self.dir_path);
     }
 
@@ -551,6 +556,14 @@ const Store = struct {
             // Append a new segment file because this last one is too big
             const path = randPath();
 
+            // HACK(Apaar): Looks like WSL doesn't have the timestamp resolution necessary to sort the files correctly.
+            // FIXME(Apaar): We should probably just come up with a path that is lexicographically greater than the
+            // path of the active segment file. Then we can sort them lexicographically in the compaction step and call it
+            // a day.
+            //
+            // Right now I'll just sleep for 10 milliseconds lol.
+            std.time.sleep(10_000_000);
+
             var new_file = try SegmentFile.create(self.allocator, &self.dir.dir, &path, .{ .read = true });
             errdefer new_file.unref();
 
@@ -650,19 +663,12 @@ const Store = struct {
 
         // TODO(Apaar): Implement cancellation after a certain amount of time has elapsed
 
-        // We don't want to interact with self.segment_files and self.key_to_value_metadata as much as possible,
-        // so we open our directory again here rather than accessing either of these.
-        var dir = try std.fs.cwd().makeOpenPathIterable(self.dir_path, .{});
-        defer dir.close();
-
         // Append all the compacted stuff into a single file as much as possible, no need to care about
         // max_segment_size for an "inactive" segment.
         const compacted_file_path = randPath();
 
-        var compacted_file = try SegmentFile.create(self.allocator, &dir.dir, &compacted_file_path, .{ .read = true });
-        errdefer {
-            compacted_file.unref();
-        }
+        var compacted_file = try SegmentFile.create(self.allocator, &self.dir.dir, &compacted_file_path, .{ .read = true });
+        errdefer compacted_file.unref();
 
         var temp_key_buf = std.ArrayList(u8).init(self.allocator);
         defer temp_key_buf.deinit();
@@ -697,7 +703,7 @@ const Store = struct {
             key_to_set_op_range.deinit();
         }
 
-        var dir_iter = dir.iterate();
+        var dir_iter = self.dir.iterate();
 
         while (try dir_iter.next()) |dir_entry| {
             // TODO(Apaar): Do not assume the nested files are always regular files
@@ -708,7 +714,7 @@ const Store = struct {
                 continue;
             }
 
-            var file = try dir.dir.openFile(dir_entry.name, File.OpenFlags{ .mode = .read_only });
+            var file = try self.dir.dir.openFile(dir_entry.name, File.OpenFlags{ .mode = .read_only });
 
             if (try file.getEndPos() < self.max_segment_size) {
                 // This is probably the active file, skip it
@@ -754,12 +760,6 @@ const Store = struct {
                             .size = header_size + op.key_len + op.value_len,
                             .value_offset_relative_to_pos = header_size + op.key_len,
                         };
-
-                        std.debug.print("Read set_op_range: pos={} size={} value_offset={}\n", .{
-                            set_op_range.pos,
-                            set_op_range.size,
-                            set_op_range.value_offset_relative_to_pos,
-                        });
 
                         // Skip over the value
                         _ = try file.seekBy(@intCast(op.value_len));
@@ -814,17 +814,10 @@ const Store = struct {
                 range.compactable_file_index
             ];
 
-            std.debug.print("Key to set op range entry: '{s}' {}\n", .{ entry.key_ptr.*, range });
+            const compacted_pos = try compacted_file.file.getEndPos();
 
             // TODO(Apaar): Handle failure to copy here?
-            _ = try src_file.copyRangeAll(range.pos, compacted_file.file, try compacted_file.file.getEndPos(), range.size);
-        }
-
-        // Restart the iterator
-        key_to_set_op_range_iter = key_to_set_op_range.iterator();
-
-        while (key_to_set_op_range_iter.next()) |entry| {
-            const range = entry.value_ptr.*;
+            _ = try src_file.copyRangeAll(range.pos, compacted_file.file, compacted_pos, range.size);
 
             self.lock.lock();
             defer self.lock.unlock();
@@ -839,7 +832,7 @@ const Store = struct {
             var prev_entry = self.key_to_value_metadata.getEntry(entry.key_ptr.*) orelse continue;
 
             prev_entry.value_ptr.* = ValueMetadata{
-                .offset = range.pos + range.value_offset_relative_to_pos,
+                .offset = compacted_pos + range.value_offset_relative_to_pos,
                 .len = range.size - range.value_offset_relative_to_pos,
                 .file = compacted_file,
             };
@@ -863,6 +856,40 @@ const Store = struct {
         self.segment_files.items[1] = active_segment_file;
     }
 };
+
+// Export C functions to use our store from any language
+const CBuffer = extern struct {
+    ptr: [*c]u8,
+    len: u64,
+};
+
+const EMPTY_C_BUFFER = CBuffer{
+    .ptr = null,
+    .len = 0,
+};
+
+export fn Store_create(dir_path: [*:0]const u8, max_segment_size: u64) ?*Store {
+    const dir_path_slice = std.mem.span(dir_path);
+    const store = std.heap.c_allocator.create(Store) catch return null;
+
+    store.* = Store.init(std.heap.c_allocator, dir_path_slice, max_segment_size) catch return null;
+
+    return store;
+}
+
+export fn Store_getAllocValue(store: *Store, key: [*:0]const u8) CBuffer {
+    const key_slice = std.mem.span(key);
+
+    var proxy = store.get(key_slice) orelse return EMPTY_C_BUFFER;
+    defer proxy.deinit();
+
+    const ptr = proxy.readAlloc(std.heap.c_allocator) catch return EMPTY_C_BUFFER;
+
+    return .{
+        .ptr = ptr.ptr,
+        .len = proxy.len,
+    };
+}
 
 const temp_prefix = "tmp/";
 const TempPath = [temp_prefix.len + rand_path_len]u8;
@@ -990,4 +1017,26 @@ test "set, compact, and get" {
     defer std.testing.allocator.free(value);
 
     try std.testing.expectEqualStrings("universe", value);
+}
+
+test "set, get, compact, and retrieve from previous get" {
+    var dir_path = tempPath();
+
+    var store = try Store.init(std.testing.allocator, &dir_path, test_max_segment_size);
+
+    defer store.deinit();
+
+    try store.setAllocKey("hello", "world");
+
+    var proxy = store.get("hello").?;
+    defer proxy.deinit();
+
+    try store.setAllocKey("hello", "universe");
+
+    try store.compactForMillis(10);
+
+    var value = try proxy.readAlloc(std.testing.allocator);
+    defer std.testing.allocator.free(value);
+
+    try std.testing.expectEqualStrings("world", value);
 }
