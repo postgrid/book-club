@@ -5,6 +5,12 @@ usually sufficient but you can also have a folder for each.
 
 ## Schedule
 
+### Week 22 (March 12 - March 19)
+
+Implement MVCC instead of the approach we did in Week 18, and benchmark the two approaches.
+
+**BONUS** See if you can speed up our Week 18 approach to be competitive with MVCC (assuming it isn't already, though in theory it should be slower).
+
 ### Week 21 (March 5 - March 12)
 
 Read up until "Preventing Lost Updates" on page 242.
