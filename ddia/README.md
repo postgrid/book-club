@@ -5,6 +5,10 @@ usually sufficient but you can also have a folder for each.
 
 ## Schedule
 
+### Week 23 (April 23 - April 30)
+
+Read up until "Encapsulating transactions in stored procedures" on page 253.
+
 ### Week 22 (March 12 - March 19)
 
 Implement MVCC instead of the approach we did in Week 18, and benchmark the two approaches.
