@@ -5,6 +5,10 @@ usually sufficient but you can also have a folder for each.
 
 ## Schedule
 
+### Week 24 (June 4 - June 11)
+
+Continue the reading from Week 23.
+
 ### Week 23 (April 23 - April 30)
 
 Read up until "Encapsulating transactions in stored procedures" on page 253.
