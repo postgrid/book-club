@@ -5,6 +5,10 @@ usually sufficient but you can also have a folder for each.
 
 ## Schedule
 
+### Week 25 (June 11 - June 18)
+
+Read up until "Serializable Snapshot Isolation" on page 261.
+
 ### Week 24 (June 4 - June 11)
 
 Continue the reading from Week 23.
