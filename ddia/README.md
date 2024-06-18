@@ -5,6 +5,12 @@ usually sufficient but you can also have a folder for each.
 
 ## Schedule
 
+### Week 26 (June 18 - June 25)
+
+Read up until the end of the chapter on page 267.
+
+Try implementing snapshot isolation (not serializable) using MVCC (assignment from week 22).
+
 ### Week 25 (June 11 - June 18)
 
 Read up until "Serializable Snapshot Isolation" on page 261.
