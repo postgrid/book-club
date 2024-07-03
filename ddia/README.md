@@ -5,6 +5,10 @@ usually sufficient but you can also have a folder for each.
 
 ## Schedule
 
+### Week 27 (July 3 - July 9)
+
+Read up until "Detecting Faults" on page 280.
+
 ### Week 26 (June 18 - June 25)
 
 Read up until the end of the chapter on page 267.
