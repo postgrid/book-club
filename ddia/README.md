@@ -11,6 +11,9 @@ Read up until the end of page 299.
 
 Create a server which logs the time-of-day of each client (sent over in regular intervals). Do it over TCP.
 
+Apaar will provide a relay server which will allow you to register your server with it and receive packets
+from clients who connect to the relay server. This way you won't have to host anything yourself.
+
 ### Week 27 (July 3 - July 9)
 
 Read up until "Detecting Faults" on page 280.
