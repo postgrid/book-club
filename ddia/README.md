@@ -9,6 +9,8 @@ usually sufficient but you can also have a folder for each.
 
 Read up until the end of page 299.
 
+Create a server which logs the time-of-day of each client (sent over in regular intervals). Do it over TCP.
+
 ### Week 27 (July 3 - July 9)
 
 Read up until "Detecting Faults" on page 280.
