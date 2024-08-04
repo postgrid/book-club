@@ -17,7 +17,6 @@ log_message() {
     local msg="$2"
     local ts=`date -u +"%Y-%m-%dT%H:%M:%SZ"`
     local line="[$ts] [$context] $msg"
-    echo "$line"
     echo "$line" >> "$LOGFILE"
 }
 
@@ -56,6 +55,9 @@ while true; do
     if ! is_program_running; then
         log_message "SUPERVISOR" "Program is not running. Starting..."
         start_program $@
+
+        # Wait one second before we log program metrics
+        sleep 1
     fi
     log_program_metrics
     cycle_log_if_required

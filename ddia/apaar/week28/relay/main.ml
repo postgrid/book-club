@@ -6,7 +6,7 @@ let sock_listener =
   let descr = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
   Unix.setsockopt descr Unix.SO_REUSEADDR true;
   Unix.setsockopt descr Unix.SO_REUSEPORT true;
-  Unix.bind descr (Unix.ADDR_INET (Unix.inet_addr_loopback, port));
+  Unix.bind descr (Unix.ADDR_INET (Unix.inet_addr_any, port));
   Unix.listen descr max_pending_connections;
   Printf.printf "Listening on port %d\n%!" port;
   descr

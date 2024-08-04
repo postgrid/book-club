@@ -1,8 +1,9 @@
+import sys
 import socket
 import struct
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-sock.connect(("localhost", 8080))
+sock.connect((sys.argv[1], int(sys.argv[2])))
 
 name = input("Conn name > ")
 
