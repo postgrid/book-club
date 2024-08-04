@@ -9,8 +9,8 @@ set -euo pipefail
 
 dune build --profile release
 
-chmod +w ./_build/default/main.exe
-cp -f ./_build/default/main.exe ./binaries/linux_amd64/relay
+chmod +w ./_build/default/relay.exe
+cp -f ./_build/default/relay.exe ./binaries/linux_amd64/relay
 
 # Stop the running processes, if any
 ssh -i "$PROD_SSH_KEY_PATH" "$PROD_SSH_DEST" pkill -f "supervisor.sh" > /dev/null || true
