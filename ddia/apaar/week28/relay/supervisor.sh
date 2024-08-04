@@ -48,7 +48,8 @@ log_program_metrics() {
     local pid=`get_program_pid`
     local cpu=`ps --no-headers -p "$pid" -o %cpu | tr -d ' '`
     local mem=`ps --no-headers -p "$pid" -o %mem | tr -d ' '`
-    log_message "METRICS" "pid=$pid cpu=$cpu mem=$mem"
+    local threads=`ps --no-headers -p "$pid" -o thcount | tr -d ' '`
+    log_message "METRICS" "pid=$pid cpu=$cpu mem=$mem threads=$threads"
 }
 
 while true; do

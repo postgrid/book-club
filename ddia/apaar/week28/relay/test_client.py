@@ -3,16 +3,15 @@ import socket
 import struct
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-sock.connect((sys.argv[1], int(sys.argv[2])))
 
-name = input("Conn name > ")
+sock.connect((sys.argv[1], int(sys.argv[2])))
+name = sys.argv[3]
 
 def send_len_bytes(b):
-    sock.sendall(struct.pack("<i", len(b)))
-    sock.sendall(b)
+    sock.sendall(bytes(f"{len(b)}|", encoding="utf8") + b)
 
 def send_name(s):
-    send_len_bytes(bytes(s, encoding="utf8"))
+    sock.sendall(bytes(f"{s}|", encoding="utf8"))
 
 send_name(name)
 

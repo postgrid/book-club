@@ -1,5 +1,3 @@
-let conns = Mvalue.create (ref [])
-
 let sock_listener =
   let port = int_of_string Sys.argv.(1) in
   let max_pending_connections = 8 in
@@ -12,6 +10,7 @@ let sock_listener =
   descr
 
 let () =
+  Printexc.record_backtrace true;
   while true do
     let sock, addr = Unix.accept sock_listener in
     match addr with
@@ -19,9 +18,7 @@ let () =
         Printf.printf "New connection: %s:%d\n%!"
           (Unix.string_of_inet_addr inet_addr)
           port;
-        let _ =
-          Domain.spawn (fun () -> Conn.handle { name = None; sock } conns)
-        in
+        let _ = Domain.spawn (fun () -> Conn.handle sock) in
         ()
     | _ -> ()
   done

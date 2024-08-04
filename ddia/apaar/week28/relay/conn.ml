@@ -1,68 +1,77 @@
-type t = { mutable name : string option; sock : Unix.file_descr }
+type t = { name : string; sock : Unix.file_descr; bs : Bufstream.t }
 
-let read_all sock n =
-  let buf = Bytes.create n in
-  let bytes_read = ref 0 in
-  while !bytes_read < n do
-    let count = Unix.recv sock buf !bytes_read (n - !bytes_read) [] in
-    if count = 0 then raise End_of_file else bytes_read := !bytes_read + count
-  done;
-  buf
+let delim = '|'
+let name_timeout = 3.0
+let all_conns = Mvalue.create (ref [])
 
-let read_bool sock =
-  let buf = read_all sock 1 in
-  Bytes.get buf 0 <> char_of_int 0
+let rec read_until_delim sock bs =
+  let b = Bufstream.read_bytes_until_char bs '|' in
+  match b with
+  | Some b ->
+      (* Skip the delimiter *)
+      Bufstream.consume_bytes bs 1;
+      b
+  | _ ->
+      let recv_buf = Bytes.create 256 in
+      let count = Unix.recv sock recv_buf 0 256 [] in
+      Bufstream.write_subbytes bs recv_buf 0 count;
+      read_until_delim sock bs
 
-let read_int32_le sock =
-  let buf = read_all sock 4 in
-  Int32.to_int (Bytes.get_int32_le buf 0)
+let read_string_until_delim sock bs =
+  Bytes.unsafe_to_string @@ read_until_delim sock bs
 
-let read_string sock =
-  let len = read_int32_le sock in
-  Bytes.to_string (read_all sock len)
-
-let write_all sock buf =
-  let bytes_written = ref 0 in
-  let len = Bytes.length buf in
-  while !bytes_written < len do
-    let count = Unix.send sock buf !bytes_written (len - !bytes_written) [] in
-    if count = 0 then raise End_of_file
-    else bytes_written := !bytes_written + count
-  done
-
-let handle conn all_conns =
+let handle sock =
+  let name_to_remove = ref None in
   try
-    let name = read_string conn.sock in
-    conn.name <- Some name;
+    let bs = Bufstream.create 16 in
+    (* Set a recv timeout until we get to the loop, otherwise rando connections who don't
+       know the protocol might hog resources *)
+    Unix.setsockopt_float sock Unix.SO_RCVTIMEO name_timeout;
+    let name = read_string_until_delim sock bs in
     (* If there's another conn with the same name, then kill this conn.
        Otherwise, add it. *)
     Mvalue.protect all_conns (fun conns ->
         let has_same_name_conn =
-          List.exists (fun oc -> oc.name = conn.name) !conns
+          List.exists (fun oc -> oc.name = name) !conns
         in
         if has_same_name_conn then (
-          conn.name <- Some (Option.get conn.name ^ " (copy)");
+          name_to_remove := Some (name ^ " (copy, so I'm killing it)");
           raise Exit)
-        else conns := conn :: !conns);
+        else conns := { name; sock; bs } :: !conns);
+    name_to_remove := Some name;
     Printf.printf "Connection named itself '%s'\n%!" name;
+    (* Time out in 30s now that we've established a name *)
+    Unix.setsockopt_float sock Unix.SO_RCVTIMEO 30.0;
     while true do
-      let dest_name = read_string conn.sock in
-      let packet_len = read_int32_le conn.sock in
-      let buf = read_all conn.sock packet_len in
+      let dest_name = read_string_until_delim sock bs in
+      let packet_len_str = read_string_until_delim sock bs in
+      let packet_len = int_of_string packet_len_str in
+      let () =
+        if packet_len < 0 then raise (Invalid_argument "Negative packet length")
+      in
+      (* We may have already buffered some of the input so read the _remaining_ amount *)
+      let packet_buf =
+        Sockutil.read_all sock (packet_len - Bufstream.length bs)
+      in
+      Bufstream.write_bytes bs packet_buf;
       let other_conn =
         Mvalue.protect all_conns (fun conns ->
-            List.find_opt (fun oc -> oc.name = Some dest_name) !conns)
+            List.find_opt (fun oc -> oc.name = dest_name) !conns)
       in
       (* If there's no other socket with that name, then
          this message just goes into the aether *)
       match other_conn with
       (* Can't send to yourself hence the when *)
-      | Some oc when oc.name != conn.name -> write_all oc.sock buf
-      | _ -> ()
+      | Some oc when oc.name != name ->
+          Sockutil.write_all oc.sock (Bufstream.read_bytes bs packet_len)
+      | _ -> Bufstream.consume_bytes bs packet_len
     done
-  with _ ->
-    Printf.printf "Connection '%s' died\n%!"
-      (Option.value conn.name ~default:"(unnamed)");
+  with e ->
+    let exc_s = Printexc.to_string e in
+    let exc_b = Printexc.get_backtrace () in
+    let rem_name = Option.value !name_to_remove ~default:"(unnamed)" in
+    Printf.printf "Connection '%s' raised an exception: %s %s\n%!" rem_name
+      exc_s exc_b;
     Mvalue.protect all_conns (fun conns ->
-        conns := List.filter (fun oc -> oc.name = conn.name) !conns);
-    Unix.close conn.sock
+        conns := List.filter (fun oc -> oc.name = rem_name) !conns);
+    Unix.close sock
