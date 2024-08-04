@@ -20,5 +20,7 @@ let to_string t =
   | Get { key } -> Printf.sprintf "GET %s" key
   | Set { key; value } -> Printf.sprintf "SET %s %s" key value
   | ConstraintIsInt { key } -> Printf.sprintf "CONSTRAINT_IS_INT %s" key
-  | ConstraintIntGte { key; value } -> Printf.sprintf "CONSTRAINT_INT_GTE %s %d" key value
-  | ConstraintIntLte { key; value } -> Printf.sprintf "CONSTRAINT_INT_LTE %s %d" key value
+  | ConstraintIntGte { key; value } ->
+      Printf.sprintf "CONSTRAINT_INT_GTE %s %d" key value
+  | ConstraintIntLte { key; value } ->
+      Printf.sprintf "CONSTRAINT_INT_LTE %s %d" key value
