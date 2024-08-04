@@ -1,7 +1,7 @@
 let conns = Mvalue.create (ref [])
 
 let sock_listener =
-  let port = 8080 in
+  let port = int_of_string Sys.argv.(1) in
   let max_pending_connections = 8 in
   let descr = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
   Unix.setsockopt descr Unix.SO_REUSEADDR true;
