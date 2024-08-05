@@ -63,6 +63,9 @@ let handle sock =
       match other_conn with
       (* Can't send to yourself hence the when *)
       | Some oc when oc.name != name ->
+          (* Prefix the message with the sender and the packet length *)
+          Sockutil.write_all oc.sock
+            (Bytes.unsafe_of_string @@ Printf.sprintf "%s|%d|" name packet_len);
           Sockutil.write_all oc.sock (Bufstream.read_bytes bs packet_len)
       | _ -> Bufstream.consume_bytes bs packet_len
     done

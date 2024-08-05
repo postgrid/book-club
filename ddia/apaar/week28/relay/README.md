@@ -25,7 +25,7 @@ Dest name > device_a
 Data > hello
 
 # And then you should see the following in your device_a terminal
-b'hello'
+b'device_b|5|hello'
 ```
 
 ## Hosted Instance
