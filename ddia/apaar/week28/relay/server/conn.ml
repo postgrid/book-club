@@ -1,6 +1,7 @@
 open Socklib
 
-type t = { name : string; bfs : Bufsock.t }
+(* We wrap the socket in a mutex because we want the writes to not be split *)
+type t = { name : string; write_sock : Unix.file_descr Mvalue.t }
 
 let delim = '|'
 let name_timeout = 3.0
@@ -25,8 +26,9 @@ let handle sock =
         in
         if has_same_name_conn then (
           name_to_remove := Some (name ^ " (copy, so I'm killing it)");
-          raise Exit)
-        else conns := { name; bfs } :: !conns);
+          raise Exit
+          (* We only store the socket for writing because reads only happen on this thread *))
+        else conns := { name; write_sock = Mvalue.create bfs.sock } :: !conns);
     name_to_remove := Some name;
     Printf.printf "Connection named itself '%s'\n%!" name;
     (* Time out in 30s now that we've established a name *)
@@ -47,10 +49,12 @@ let handle sock =
       match other_conn with
       (* Can't send to yourself hence the when *)
       | Some oc when oc.name != name ->
-          (* Prefix the message with the sender and the packet length *)
-          Sockutil.write_all oc.bfs.sock
-            (Bytes.unsafe_of_string @@ Printf.sprintf "%s|%d|" name packet_len);
-          Sockutil.write_all oc.bfs.sock packet
+          Mvalue.protect oc.write_sock (fun sock ->
+              (* Prefix the message with the sender and the packet length *)
+              Sockutil.write_all sock
+                (Bytes.unsafe_of_string
+                @@ Printf.sprintf "%s|%d|" name packet_len);
+              Sockutil.write_all sock packet)
       | _ -> ()
     done
   with e ->

@@ -20,6 +20,10 @@ while True:
 
     if cmd == "recv":
         s = sock.recv(1024)
+        
+        if len(s) == 0:
+            raise Exception("Disconnected from server.")
+
         parts = s.split(b'|')
 
         if len(parts) < 3:
@@ -33,7 +37,7 @@ while True:
             rest_data = sock.recv(packet_len - len(data))
             data += rest_data
 
-        print(sender_name, data)
+        print(sender_name + b'|' + packet_len_str + b'|' + data)
     elif cmd == "send":
         dest = input("Dest name > ")
 
