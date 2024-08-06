@@ -1,3 +1,5 @@
+open Socklib
+
 type t = { name : string; sock : Unix.file_descr; bs : Bufstream.t }
 
 let delim = '|'
