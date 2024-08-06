@@ -38,6 +38,8 @@ In case you want to self-host this relay, I've included pre-built binaries by pl
 
 ## TODO
 
+- [ ] Figure out why CPU usage suddenly starts spiking when I have some socket disconnected
+    - The "threads" metric seems to get stuck
 - [ ] Make a "tunnel" for this relay which knows the remote name and forwards the packets it receives to that remote name via the relay
     - Your programs don't need to know the protocol to use this tunnel (unlike connecting directly to the relay)
     - The tunnel can also take any packets it recieves and make requests to your local services (bidirectional), which means it should be able to do e.g. HTTP
