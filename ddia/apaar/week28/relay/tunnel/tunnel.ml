@@ -8,6 +8,16 @@ let relay_sock =
   (* Send our name over *)
   Sockutil.write_all sock
     (Bytes.unsafe_of_string @@ Printf.sprintf "%s|" args.relay_device_name);
+  let _ =
+    Domain.spawn (fun () ->
+        while true do
+          (* Send name and zero packet to keep us connected *)
+          Sockutil.write_all sock
+            (Bytes.unsafe_of_string
+            @@ Printf.sprintf "%s|0|" args.relay_device_name);
+          Unix.sleep 15
+        done)
+  in
   Bufsock.create sock 64
 
 let read_relay_header () =
@@ -34,7 +44,8 @@ let http_server_loop () =
           let count =
             Unix.recv relay_sock.sock recv_bytes 0 (Bytes.length recv_bytes) []
           in
-          Bufstream.write_subbytes relay_sock.bs recv_bytes 0 count)
+          if count = 0 then raise End_of_file
+          else Bufstream.write_subbytes relay_sock.bs recv_bytes 0 count)
         resp_buf
     in
     Printf.printf "%s|%s\n" client_devname

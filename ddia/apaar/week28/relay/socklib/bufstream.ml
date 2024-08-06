@@ -15,7 +15,7 @@ let unsafe_consume_bytes t len =
 
 let consume_bytes t len =
   if t.read_pos + len > Buffer.length t.buf then
-    raise (Invalid_argument "Skipped bytes exceed buffer length")
+    invalid_arg "Skipped bytes exceed buffer length"
   else unsafe_consume_bytes t len
 
 let read_bytes t len =
@@ -27,7 +27,8 @@ let read_remaining t = read_bytes t (Buffer.length t.buf - t.read_pos)
 
 let read_bytes_until_char t ch =
   let b =
-    Bytes.unsafe_of_string @@ Buffer.sub t.buf t.read_pos (Buffer.length t.buf)
+    Bytes.unsafe_of_string
+    @@ Buffer.sub t.buf t.read_pos (Buffer.length t.buf - t.read_pos)
   in
   let pos = Bytes.index_opt b ch in
   match pos with

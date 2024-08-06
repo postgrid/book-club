@@ -39,7 +39,7 @@ let get_inet_addr host port =
 let addr_of_string hp =
   match String.split_on_char ':' hp with
   | [ host; port ] -> get_inet_addr host port
-  | _ -> failwith @@ Printf.sprintf "Invalid host + port string: %s" hp
+  | _ -> invalid_arg @@ Printf.sprintf "Invalid host + port string: %s" hp
 
 let parse_argv args =
   let relay = ref None in
@@ -69,6 +69,6 @@ let parse_argv args =
         relay_device_name = devname;
         local_addr = addr_of_string local;
       }
-  | _ -> failwith "All of -local, -devname, and -relay must be provided"
+  | _ -> invalid_arg "All of -local, -devname, and -relay must be provided"
 
 let parse () = parse_argv Sys.argv

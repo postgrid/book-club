@@ -9,7 +9,8 @@ let rec read_until_delim t ch =
   | _ ->
       let recv_buf = Bytes.create 256 in
       let count = Unix.recv t.sock recv_buf 0 256 [] in
-      Bufstream.write_subbytes t.bs recv_buf 0 count;
+      if count = 0 then raise End_of_file
+      else Bufstream.write_subbytes t.bs recv_buf 0 count;
       read_until_delim t ch
 
 let read_until_delim_skip_delim t ch =

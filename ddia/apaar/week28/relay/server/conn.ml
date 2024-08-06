@@ -11,6 +11,7 @@ let read_string_until_delim bfs =
   Bytes.unsafe_to_string @@ Bufsock.read_until_delim_skip_delim bfs delim
 
 let handle sock =
+  Printexc.record_backtrace true;
   let name_to_remove = ref None in
   try
     let bfs = Bufsock.create sock 16 in
@@ -33,12 +34,11 @@ let handle sock =
     Printf.printf "Connection named itself '%s'\n%!" name;
     (* Time out in 30s now that we've established a name *)
     Unix.setsockopt_float sock Unix.SO_RCVTIMEO 30.0;
+    Unix.setsockopt_float sock Unix.SO_SNDTIMEO 30.0;
     while true do
       let dest_name = read_string_until_delim bfs in
       let packet_len = int_of_string @@ read_string_until_delim bfs in
-      let () =
-        if packet_len < 0 then raise (Invalid_argument "Negative packet length")
-      in
+      let () = if packet_len < 0 then invalid_arg "Negative packet length" in
       let packet = Bufsock.read_bytes bfs packet_len in
       let other_conn =
         Mvalue.protect all_conns (fun conns ->
@@ -59,8 +59,10 @@ let handle sock =
     done
   with e ->
     let exc_s = Printexc.to_string e in
+    let exc_b = Printexc.get_backtrace () in
     let rem_name = Option.value !name_to_remove ~default:"(unnamed)" in
-    Printf.printf "Connection '%s' raised an exception: %s\n%!" rem_name exc_s;
+    Printf.printf "Connection '%s' raised an exception: %s %s\n%!" rem_name
+      exc_s exc_b;
     Mvalue.protect all_conns (fun conns ->
         conns := List.filter (fun oc -> oc.name = rem_name) !conns);
     Unix.close sock
