@@ -3,7 +3,7 @@
 # This script automatically builds and pushes to a
 # prod instance as defined in a .env.push file.
 
-source ./prod_ssh_config.sh
+source ./scripts/prod_ssh_config.sh
 
 set -euo pipefail
 
@@ -16,7 +16,7 @@ cp -f ./_build/default/server/server.exe ./binaries/linux_amd64/relay-server
 ssh -i "$PROD_SSH_KEY_PATH" "$PROD_SSH_DEST" pkill -f "supervisor.sh" > /dev/null || true
 ssh -i "$PROD_SSH_KEY_PATH" "$PROD_SSH_DEST" pkill -f "relay-server" > /dev/null || true
 
-scp -i "$PROD_SSH_KEY_PATH" ./binaries/linux_amd64/relay-server supervisor.sh "$PROD_SSH_DEST:~"
+scp -i "$PROD_SSH_KEY_PATH" ./binaries/linux_amd64/relay-server ./scripts/supervisor.sh "$PROD_SSH_DEST:~"
 
 # Start the supervisor again. Have to do it in a separate command because
 # I don't care about the pkill output above.
