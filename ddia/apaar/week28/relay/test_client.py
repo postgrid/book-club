@@ -20,7 +20,20 @@ while True:
 
     if cmd == "recv":
         s = sock.recv(1024)
-        print(s)
+        parts = s.split(b'|')
+
+        if len(parts) < 3:
+            raise Exception(f"Received message had an invalid format: {s}")
+
+        sender_name, packet_len_str, data = parts
+        packet_len = int(packet_len_str.decode(errors="ignore"))
+
+        if len(data) < packet_len:
+            # Recv the rest of the data
+            rest_data = sock.recv(packet_len - len(data))
+            data += rest_data
+
+        print(sender_name, data)
     elif cmd == "send":
         dest = input("Dest name > ")
 

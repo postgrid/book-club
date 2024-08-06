@@ -7,7 +7,7 @@ source ./prod_ssh_config.sh
 
 set -euo pipefail
 
-dune build --profile release
+dune build --profile "$PROD_BUILD_PROFILE"
 
 chmod +w ./_build/default/relay.exe
 cp -f ./_build/default/relay.exe ./binaries/linux_amd64/relay

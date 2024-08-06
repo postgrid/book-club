@@ -10,7 +10,6 @@ let sock_listener =
   descr
 
 let () =
-  Printexc.record_backtrace true;
   while true do
     let sock, addr = Unix.accept sock_listener in
     match addr with

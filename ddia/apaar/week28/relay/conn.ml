@@ -71,10 +71,8 @@ let handle sock =
     done
   with e ->
     let exc_s = Printexc.to_string e in
-    let exc_b = Printexc.get_backtrace () in
     let rem_name = Option.value !name_to_remove ~default:"(unnamed)" in
-    Printf.printf "Connection '%s' raised an exception: %s %s\n%!" rem_name
-      exc_s exc_b;
+    Printf.printf "Connection '%s' raised an exception: %s\n%!" rem_name exc_s;
     Mvalue.protect all_conns (fun conns ->
         conns := List.filter (fun oc -> oc.name = rem_name) !conns);
     Unix.close sock
