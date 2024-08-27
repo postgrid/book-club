@@ -5,6 +5,10 @@ usually sufficient but you can also have a folder for each.
 
 ## Schedule
 
+### Week 29 (Aug 27 - Sept 3)
+
+Read up from page 299 to the end of the chapter. 
+
 ### Week 28 (July 30 - August 6)
 
 Read up until the end of page 299.
