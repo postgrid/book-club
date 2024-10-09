@@ -5,6 +5,10 @@ usually sufficient but you can also have a folder for each.
 
 ## Schedule
 
+### Week 30 (Oct 9 - Oct 16)
+
+TODO @Calvin.
+
 ### Week 29 (Aug 27 - Sept 3)
 
 Read up from page 299 to the end of the chapter. 
