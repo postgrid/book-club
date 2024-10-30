@@ -7,11 +7,29 @@ usually sufficient but you can also have a folder for each.
 
 ### Week 31 (Oct 23 - Oct 30)
 
-TODO @Calvin.
+See week 30
 
 ### Week 30 (Oct 9 - Oct 16)
 
-TODO @Calvin.
+Create a linearizable key-value store that accepts a "read" and a "write" operation. For simplicity, values can only be integers and keys can only be strings.
+
+For this store to be linearizable, it must appear as if there is only one copy of the data. In the simplest form of this exercise, there _is_ only one copy of the data. 
+Keeping it simple, your non-distributed key-value store can introduce artifial delays in the reading, writing, and processing of requests to simulate non-deterministic delays (such as network delays).
+This store must keep the following true: If one client's read returns a new value, all following reads _must_ return this new value (even if the write request has not yet completed).
+
+This datastore must be called by multiple clients concurrently and hold the previous invariant for all requests. 
+
+#### Bonus 1
+
+Add in an atomic _compare-and-set (cas)_ operation (referenced on page 327)
+
+#### Bonus 2
+
+Record the timings of all requests and responses. Are you able to arrange these into a valid sequential order?
+
+#### Bonus 3
+
+Distribute your key-value store with replica nodes and keep all previous invariants of the system.
 
 ### Week 29 (Aug 27 - Sept 3)
 
