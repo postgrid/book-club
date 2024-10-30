@@ -11,9 +11,12 @@ See week 30
 
 ### Week 30 (Oct 9 - Oct 16)
 
-Create a linearizable key-value store that accepts a "read" and a "write" operation. For simplicity, values can only be integers and keys can only be strings.
+Create a linearizable key-value store that accepts a "read" and a "write" operation. For simplicity, values can only be integers and keys can only be strings but feel free to have it accept any values you'd like.
 
-For this store to be linearizable, it must appear as if there is only one copy of the data. In the simplest form of this exercise, there _is_ only one copy of the data. 
+For this store to be linearizable, it must appear as if there is only one copy of the data. To do so simply, create a data structure that will act
+as your distributed store. This should have a constant leader with one or more read replicas. All writes should go through the leader while any read
+can go to the leader or any read replicas.
+
 Keeping it simple, your non-distributed key-value store can introduce artifial delays in the reading, writing, and processing of requests to simulate non-deterministic delays (such as network delays).
 This store must keep the following true: If one client's read returns a new value, all following reads _must_ return this new value (even if the write request has not yet completed).
 
