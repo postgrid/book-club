@@ -5,6 +5,11 @@ usually sufficient but you can also have a folder for each.
 
 ## Schedule
 
+### Week 32 (Nov 20 - Nov 27)
+
+Read through [this](https://pmg.csail.mit.edu/papers/vr-revisited.pdf) and make step-by-step notes of how you would implement it.
+No code required.
+
 ### Week 31 (Oct 23 - Oct 30)
 
 See week 30
