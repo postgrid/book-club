@@ -5,6 +5,10 @@ usually sufficient but you can also have a folder for each.
 
 ## Schedule
 
+### Week 33 (Jan 8 - Jan 15)
+
+Continue reading the viewstamped replication paper.
+
 ### Week 32 (Nov 20 - Nov 27)
 
 Read through [this](https://pmg.csail.mit.edu/papers/vr-revisited.pdf) and make step-by-step notes of how you would implement it.
